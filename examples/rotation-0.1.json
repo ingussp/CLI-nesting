@@ -1,0 +1,39 @@
+{
+  "units": "mm",
+  "config": {
+    "algorithm": "bitmap",
+    "rotationStep": 0.1,
+    "resolution": 0.1,
+    "trials": 1,
+    "threads": 1
+  },
+  "sheet": {
+    "id": "precision_sheet",
+    "width": 10.001,
+    "height": 2.001
+  },
+  "parts": [
+    {
+      "id": "fractional_angle_part",
+      "quantity": 1,
+      "points": [
+        [
+          0.0,
+          0.0
+        ],
+        [
+          9.999984769132876,
+          -0.017453283658983087
+        ],
+        [
+          10.003475425864673,
+          1.9825436701675923
+        ],
+        [
+          0.0034906567317966176,
+          1.9999969538265754
+        ]
+      ]
+    }
+  ]
+}

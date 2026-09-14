@@ -1,0 +1,134 @@
+{
+  "units": "mm",
+  "config": {
+    "algorithm": "bitmap",
+    "rotationStep": 0.1,
+    "resolution": 0.5,
+    "threads": 12,
+    "trials": 4,
+    "timeLimitSeconds": 0,
+    "gpu": {
+      "enabled": true,
+      "device": -1,
+      "fallbackToCpu": true,
+      "batchSize": 65536
+    },
+    "mode": "continuous",
+    "continuousRoundSeconds": 30,
+    "step": 1,
+    "curveTolerance": 0.3,
+    "cacheRejects": true,
+    "spacing": 0
+  },
+  "sheet": {
+    "id": "sheet",
+    "width": 300,
+    "height": 200
+  },
+  "parts": [
+    {
+      "id": "fixed-45",
+      "quantity": 6,
+      "angle": 45,
+      "points": [
+        [
+          0,
+          0
+        ],
+        [
+          30,
+          0
+        ],
+        [
+          30,
+          10
+        ],
+        [
+          0,
+          10
+        ]
+      ]
+    },
+    {
+      "id": "fixed-90",
+      "quantity": 6,
+      "angle": 90,
+      "points": [
+        [
+          0,
+          0
+        ],
+        [
+          30,
+          0
+        ],
+        [
+          30,
+          10
+        ],
+        [
+          0,
+          10
+        ]
+      ]
+    },
+    {
+      "id": "choose-0-or-180",
+      "quantity": 6,
+      "allowedAngles": [
+        0,
+        180
+      ],
+      "points": [
+        [
+          0,
+          0
+        ],
+        [
+          30,
+          0
+        ],
+        [
+          30,
+          10
+        ],
+        [
+          10,
+          10
+        ],
+        [
+          10,
+          30
+        ],
+        [
+          0,
+          30
+        ]
+      ]
+    },
+    {
+      "id": "global-grid",
+      "quantity": 6,
+      "points": [
+        [
+          0,
+          0
+        ],
+        [
+          20,
+          0
+        ],
+        [
+          10,
+          15
+        ]
+      ]
+    }
+  ],
+  "output": {
+    "json": "result.json",
+    "dxf": "result.dxf",
+    "svg": "result.svg",
+    "openPreview": false
+  }
+}
