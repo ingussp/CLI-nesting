@@ -1,14 +1,15 @@
 #pragma once
 
-#include "deepnestcpp/model.hpp"
+#include "clinesting/model.hpp"
 
 #include <cstddef>
 #include <functional>
 #include <string>
 #include <vector>
 
-namespace deepnest {
+namespace clinesting {
 
+// Collect bitmap search counters, worker usage and timing diagnostics.
 struct BitmapNestingStats {
   std::string simdBackend{"scalar"};
   std::string gpuDevice;
@@ -25,14 +26,17 @@ struct BitmapNestingStats {
   size_t bitmapCollisions{0};
   size_t vectorValidationRejects{0};
   double totalBitmapMs{0.0};
+  // Store elapsed time for each bitmap search phase.
   struct PhaseTimings {
     double preparationMs{0}, proposalsMs{0}, searchMs{0}, refinementMs{0}, gpuMs{0};
+    // Accumulate phase timings from another search result.
     PhaseTimings& operator+=(const PhaseTimings& b) {
       preparationMs+=b.preparationMs; proposalsMs+=b.proposalsMs;
       searchMs+=b.searchMs; refinementMs+=b.refinementMs; gpuMs+=b.gpuMs;
       return *this;
     }
   } phases;
+  // Report the outcome and search effort for one processed copy.
   struct PartStats {
     size_t processedPart{0};
     bool placed{false};
@@ -55,6 +59,7 @@ struct BitmapNestingStats {
   size_t workersUsed{1};
   size_t proposalWorkersPerTrial{1};
   double occupiedBoundsArea{0.0};
+  // Report one strategy's placement count and phase timings.
   struct TrialStats {
     std::string strategy;
     size_t placed{0};
@@ -74,6 +79,7 @@ using BitmapPartProgressCallback = std::function<void(const BitmapNestingStats::
 // Serialized callback from search workers, after each finished/interrupted strategy.
 using BitmapLayoutCallback = std::function<void(const PlacementResult&, const BitmapNestingStats&)>;
 
+// Run bitmap strategies and retain the best validated layout.
 PlacementResult placePartsBitmap(const std::vector<Polygon>& sheets,
                                  const std::vector<Polygon>& parts,
                                  const Config& config,
@@ -81,6 +87,7 @@ PlacementResult placePartsBitmap(const std::vector<Polygon>& sheets,
                                  const BitmapPartProgressCallback& onPartProgress = {},
                                  const BitmapLayoutCallback& onLayout = {});
 
+// Report whether this build and CPU can use AVX2 bitmap operations.
 bool bitmapAvx2Supported();
 
-}  // namespace deepnest
+}  // namespace clinesting

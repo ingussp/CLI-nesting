@@ -1,7 +1,7 @@
-#include "deepnestcpp/json_io.hpp"
-#include "deepnestcpp/dxf_export.hpp"
-#include "deepnestcpp/gpu_bitmap.hpp"
-#include "deepnestcpp/continuous_nesting.hpp"
+#include "clinesting/json_io.hpp"
+#include "clinesting/dxf_export.hpp"
+#include "clinesting/gpu_bitmap.hpp"
+#include "clinesting/continuous_nesting.hpp"
 #include "continuous_results.hpp"
 #include <atomic>
 #include <csignal>
@@ -17,6 +17,7 @@ std::atomic<bool> stopRequested{false};
 static_assert(std::atomic<bool>::is_always_lock_free);
 #ifdef _WIN32
 HANDLE sessionFinished=nullptr;
+// Request cooperative cancellation when the console is interrupted.
 BOOL WINAPI stopHandler(DWORD event) {
   if(event!=CTRL_C_EVENT && event!=CTRL_BREAK_EVENT && event!=CTRL_CLOSE_EVENT) return FALSE;
   stopRequested.store(true,std::memory_order_relaxed);
@@ -26,9 +27,12 @@ BOOL WINAPI stopHandler(DWORD event) {
   return TRUE;
 }
 #else
+// Request cooperative cancellation when the console is interrupted.
 void stopHandler(int) { stopRequested.store(true,std::memory_order_relaxed); }
 #endif
+// Keep process stop handlers active during nesting and output publication.
 struct Signals {
+  // Initialize cooperative console stop handling.
   Signals() {
 #ifdef _WIN32
     sessionFinished=CreateEventW(nullptr,TRUE,FALSE,nullptr);
@@ -37,6 +41,7 @@ struct Signals {
     std::signal(SIGINT,stopHandler); std::signal(SIGTERM,stopHandler);
 #endif
   }
+  // Notify the console-close handler that the session has finished.
   ~Signals() {
 #ifdef _WIN32
     // The OS closes this process-lifetime handle; do not close it while a close
@@ -45,7 +50,9 @@ struct Signals {
 #endif
   }
 };
+// Read the process-wide cooperative stop request.
 bool stopped() { return stopRequested.load(std::memory_order_relaxed); }
+// Open the saved SVG with the platform's associated viewer.
 void preview(const std::filesystem::path& path) {
 #ifdef _WIN32
   if(reinterpret_cast<INT_PTR>(ShellExecuteW(nullptr,L"open",path.c_str(),nullptr,nullptr,SW_SHOWNORMAL))<=32)
@@ -54,30 +61,37 @@ void preview(const std::filesystem::path& path) {
   std::cout<<"Preview: "<<path.string()<<'\n';
 #endif
 }
-class Sink:public deepnest::EventSink {
+// Adapt nesting events to the current command-line workflow.
+class Sink:public clinesting::EventSink {
  public:
-  void onTestStart(const std::vector<deepnest::Polygon>& sheets,const std::vector<deepnest::Polygon>& parts,
-                   const deepnest::Config&,int) override {
+  // Receive the start-of-job notification and input counts.
+  void onTestStart(const std::vector<clinesting::Polygon>& sheets,const std::vector<clinesting::Polygon>& parts,
+                   const clinesting::Config&,int) override {
     std::cout<<"Nesting "<<parts.size()<<" parts on "<<sheets.size()<<" available sheets...\n"<<std::flush;
   }
+  // Receive the current nesting progress notification.
   void onProgress(int,double) override {}
-  void onResult(const deepnest::PlacementResult&) override {}
+  // Receive the completed placement result.
+  void onResult(const clinesting::PlacementResult&) override {}
 };
+// Parse a bounded positive integer command-line argument.
 int positive(const std::string& s,int max,const char* name) {
   size_t used=0; const int n=std::stoi(s,&used);
   if(used!=s.size() || n<1 || n>max) throw std::invalid_argument(std::string("Invalid ")+name);
   return n;
 }
+// Reject input and output paths that refer to the same file.
 void validatePaths(const std::vector<std::filesystem::path>& paths) {
   for(size_t i=0;i<paths.size();++i) for(size_t j=0;j<i;++j) {
-    const auto a=deepnest::cli::resolvePath(paths[i]),b=deepnest::cli::resolvePath(paths[j]);
-    if((deepnest::cli::within(a,b) && deepnest::cli::within(b,a)) ||
+    const auto a=clinesting::cli::resolvePath(paths[i]),b=clinesting::cli::resolvePath(paths[j]);
+    if((clinesting::cli::within(a,b) && clinesting::cli::within(b,a)) ||
        (std::filesystem::exists(a) && std::filesystem::exists(b) && std::filesystem::equivalent(a,b)))
       throw std::invalid_argument("Input, JSON, DXF and SVG must be different files");
   }
 }
 }
 
+// Parse command-line arguments and run the selected nesting workflow.
 int main(int argc,char** argv) {
   try {
     namespace fs=std::filesystem;
@@ -87,13 +101,13 @@ int main(int argc,char** argv) {
     for(int i=1;i<argc;++i) {
       const std::string arg=argv[i];
       if(arg=="--list-gpus") {
-        const auto devices=deepnest::listGpuDevices();
+        const auto devices=clinesting::listGpuDevices();
         for(const auto& d:devices) std::cout<<d.index<<": "<<d.name<<" ("<<d.vendor<<", "<<d.memoryBytes/(1024*1024)<<" MiB)\n";
         if(devices.empty()) std::cout<<"No available OpenCL GPU found.\n";
         return 0;
       }
       if(arg=="--help" || arg=="-h") {
-        std::cout<<"Usage: deepnestcpp [--input input.json]\n"
+        std::cout<<"Usage: clinesting [--input input.json]\n"
           <<"All settings belong in input.json: config.mode=first|timed|continuous, config.gpu, output.json/dxf/svg/openPreview.\n"
           <<"first: one complete greedy layout. timed: optimize until timeLimitSeconds expires.\n"
           <<"continuous: optimize until Ctrl+C or console close; clear results next to input and save resultN files.\n"
@@ -108,12 +122,12 @@ int main(int argc,char** argv) {
       else if(arg=="--dxf") dxfOverride=fs::u8path(value);
       else if(arg=="--threads") threads=positive(value,256,"threads");
       else if(arg=="--trials") trials=positive(value,4,"trials");
-      else if(arg=="--rotations") rotations=positive(value,deepnest::Config::maxRotations,"rotations");
+      else if(arg=="--rotations") rotations=positive(value,clinesting::Config::maxRotations,"rotations");
       else throw std::invalid_argument("Unknown argument: "+arg);
     }
     const auto absoluteInput=fs::weakly_canonical(input);
     const auto base=absoluteInput.parent_path();
-    auto request=deepnest::readNestingJson(absoluteInput);
+    auto request=clinesting::readNestingJson(absoluteInput);
     if(threads) request.config.threads=*threads;
     if(trials) request.config.bitmapTrials=*trials;
     if(rotations) request.config.rotations=*rotations;
@@ -125,7 +139,7 @@ int main(int argc,char** argv) {
     auto extension=output.extension().string();
     std::transform(extension.begin(),extension.end(),extension.begin(),[](unsigned char c) { return char(std::tolower(c)); });
     if(extension==".dxf") {
-      if(dxfOverride && deepnest::cli::resolvePath(*dxfOverride)!=deepnest::cli::resolvePath(output))
+      if(dxfOverride && clinesting::cli::resolvePath(*dxfOverride)!=clinesting::cli::resolvePath(output))
         throw std::invalid_argument("Conflicting DXF paths");
       dxf=output; output.replace_extension(".json");
     }
@@ -134,16 +148,16 @@ int main(int argc,char** argv) {
     if(svg) paths.push_back(*svg);
     validatePaths(paths);
     Signals signals;
-    if(request.config.mode==deepnest::SearchMode::Continuous) {
-      deepnest::cli::ResultDirectory results(base,absoluteInput);
+    if(request.config.mode==clinesting::SearchMode::Continuous) {
+      clinesting::cli::ResultDirectory results(base,absoluteInput);
       std::cout<<"Continuous search: cleared "<<results.path().string()<<"\n"
                <<"Press Ctrl+C or close this console to stop. Improving layouts are saved immediately.\n"
                <<"Restart budget: "<<request.config.continuousRoundSeconds<<" seconds; no overall time limit.\n"<<std::flush;
       size_t saved=0;
-      deepnest::runContinuousNesting(request,stopped,[&](const auto& candidate,const auto& result,size_t sequence) {
+      clinesting::runContinuousNesting(request,stopped,[&](const auto& candidate,const auto& result,size_t sequence) {
         results.save(sequence,candidate,result,dxf.has_value(),svg.has_value());
         saved=sequence;
-        const auto quality=deepnest::layoutQuality(candidate.sheets,result.placement,result.bitmapStats);
+        const auto quality=clinesting::layoutQuality(candidate.sheets,result.placement,result.bitmapStats);
         std::cout<<"Saved result"<<sequence<<".json"<<(dxf ? " + DXF" : "")<<(svg ? " + SVG" : "")
           <<"; placed: "<<candidate.individual.placement.size()-quality.unplaced
           <<"; sheet waste: "<<quality.usedSheetWasteArea<<" mm2; compact waste: "<<quality.compactWasteArea
@@ -153,26 +167,26 @@ int main(int argc,char** argv) {
       std::cout<<"Stopped by user. Saved "<<saved<<" improving layouts in "<<results.path().string()<<"\n";
       return 0;
     }
-    deepnest::OrchestratorRunStats result;
-    if(request.config.mode==deepnest::SearchMode::Timed) {
+    clinesting::OrchestratorRunStats result;
+    if(request.config.mode==clinesting::SearchMode::Timed) {
       std::cout<<"Optimizing for "<<request.config.timeLimitSeconds<<" seconds...\n"<<std::flush;
-      result=deepnest::runTimedNesting(request,stopped);
+      result=clinesting::runTimedNesting(request,stopped);
     } else {
       auto first=request;
       first.config.bitmapTrials=1;
       first.config.timeLimitSeconds=0;
       first.config.stopRequested=stopped;
       Sink sink;
-      deepnest::BackgroundOrchestrator orchestrator;
+      clinesting::BackgroundOrchestrator orchestrator;
       result=orchestrator.runWithStats(first,sink);
     }
     for(size_t i=1;i<paths.size();++i) {
       const auto parent=fs::absolute(paths[i]).parent_path();
       fs::create_directories(parent);
     }
-    deepnest::writeNestingJson(output,request,result);
-    if(dxf) deepnest::exportPlacementResultToDxf(*dxf,request.sheets,request.individual.placement,result.placement);
-    if(svg) deepnest::cli::exportSvg(*svg,request.sheets,request.individual.placement,result.placement);
+    clinesting::writeNestingJson(output,request,result);
+    if(dxf) clinesting::exportPlacementResultToDxf(*dxf,request.sheets,request.individual.placement,result.placement);
+    if(svg) clinesting::cli::exportSvg(*svg,request.sheets,request.individual.placement,result.placement);
     std::cout<<"Placed: "<<request.individual.placement.size()-result.placement.unplaced.size()
       <<", unplaced: "<<result.placement.unplaced.size()<<", utilisation: "<<result.placement.utilisation<<"%\n"
       <<"Time: "<<result.timings.totalMs<<" ms; JSON: "<<fs::absolute(output).string()<<"\n";

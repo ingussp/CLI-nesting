@@ -1,10 +1,15 @@
 # JSON CLI reference
 
 The complete current user guide, all settings, mode descriptions, examples,
-Windows build instructions and limitations are in [README.md](README.md) (Latvian).
+Windows build instructions and limitations are in [README.md](README.md) (English).
 
-Run `deepnestcpp.exe` with all settings in `input.json`, or use
-`deepnestcpp.exe --input path/to/input.json`.
+FreeCAD exports support settings, sheet outer, per-part rotations, metadata,
+and output.resultJson. The three clearances are spacing, partToSheet and
+partToHole. An optional CLI-nesting object overrides shared settings and config.
+Known legacy settings are ignored; the full list is in the README.
+
+Run `clinesting.exe` with all settings in `input.json`, or use
+`clinesting.exe --input path/to/input.json`.
 
 ## Current mode contract
 

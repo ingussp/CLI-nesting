@@ -1,649 +1,419 @@
-# CLI-nesting — detaļu izvietošana loksnēs
+# CLI-nesting
 
-Windows x64 konsoles lietotne divdimensiju detaļu izvietošanai loksnēs.
-Visas detaļas, loksnes, aprēķina režīmu, GPU un izvades opcijas var norādīt
-vienā `input.json`. Detaļu kontūras sastāv no punktiem; ir atbalstīti caurumi.
-Rezultāti: JSON integrācijai, DXF atvēršanai CAD un SVG ātrai apskatei.
+C++20 command-line nesting for polygon parts and polygon sheets, with holes,
+per-part orientations, independent clearances, OpenCL acceleration, and JSON,
+DXF and SVG output. The executable is **clinesting.exe**.
 
-Projekta repozitorijs: [ingussp/CLI-nesting](https://github.com/ingussp/CLI-nesting).
-Izpildfaila nosaukums ir **deepnestcpp.exe**; C++ bibliotēkas un vārdtelpas
-saglabā DeepnestCPP nosaukumus. Šajā repo ir lietotnes pirmkods, Windows
-būvēšanas skripti, piemēri un nepieciešamie trešo pušu galvenes faili/licences.
+This version targets **Windows x64**. Linux compilation is deferred.
 
-- [Pilns, palaižams input.json](input.json)
-- [Pirmā varianta piemērs](examples/mode-first.json)
-- [10 minūšu meklēšanas piemērs](examples/mode-timed.json)
-- [Nepārtrauktās meklēšanas piemērs](examples/mode-continuous.json)
-- [Īsā JSON uzziņa angliski](JSON_INPUT.md)
+## Build using CMake
 
-## Ātrā palaišana
-
-1. Ja lejupielādēji pirmkodu, vispirms izpildi zemāk aprakstīto Windows kompilāciju.
-   Ja saņēmi gatavu EXE, novieto to vienā mapē ar `input.json` un `run.cmd`.
-2. Rediģē repo saknes vai gatavā komplekta `input.json`.
-3. Palaid `run.cmd`: tas atrod EXE blakus skriptam vai `build-release/Release`.
-   Gatavam komplektam terminālī var palaist arī `./deepnestcpp.exe`.
-4. Apskati konsoles paziņojumu, `result.json`, `result.dxf` vai `result.svg`.
-   Ja `output.openPreview` ir ieslēgts, Windows atvērs SVG ar noklusēto skatītāju.
-5. Nepārtrauktu darbu apturi ar Ctrl+C, Ctrl+Break vai aizverot programmas konsoles logu.
-
-Bez argumentiem programma meklē `input.json` pašreizējā darba mapē.
-Komplekta `run.cmd` vispirms pāriet uz EXE mapi. Citu ievadi var izvēlēties
-ar `./deepnestcpp.exe --input "C:/darbs/input.json"`.
-JSON norādītie relatīvie izvades ceļi un `results` mape atrodas **blakus ievades JSON**.
-EXE nav jāatrodas tajā pašā mapē, ja lieto `--input`.
-
-## Trīs darba režīmi
-
-| config.mode | Darbība | Kad beidzas | Ko saglabā |
-|---|---|---|---|
-| `first` | Aprēķina pirmo gatavo izvietojumu ar vienu compact stratēģiju | Pēc šīs stratēģijas | Vienu JSON un ieslēgtos DXF/SVG |
-| `timed` | Atkārtoti izmēģina stratēģijas, detaļu secības un leņķu prioritātes | Pēc `timeLimitSeconds` vai lietotāja apturēšanas | Sesijas labāko variantu beigās |
-| `continuous` | Turpina meklēt jaunus uzlabojumus bez kopēja laika limita | Līdz lietotāja apturēšanai | Katru uzlabojumu atsevišķos numurētos failos |
-
-### A. Pirmais variants
-
-```json
-"config": {
-  "mode": "first",
-  "rotationStep": 90,
-  "gpu": false
-}
-```
-
-Šis ir noklusētais režīms. Programma mēģina izvietot visas detaļas,
-vajadzības gadījumā pārejot uz nākamajām ievadītajām loksnēm, un tad atgriež
-iegūto izvietojumu. Tā negaida papildu stratēģijas vai nejaušus atkārtojumus.
-`trials` šajā režīmā nav ietekmes: tiek izmantota viena stratēģija.
-Rotāciju pārbaudes un lokāla izvietojuma uzlabošana joprojām notiek.
-
-“Pirmais variants” nenozīmē garantiju, ka visas detaļas ietilps:
-apskati `unplacedCount`. Ja nepietiek vietas vai meklēšana neatrod derīgu pozīciju,
-detaļas paliek neizvietoto sarakstā. Šajā režīmā `timeLimitSeconds` jābūt 0
-vai laukam jābūt izlaistam.
-
-### B. Labākais variants noteiktā laikā
-
-```json
-"config": {
-  "mode": "timed",
-  "timeLimitSeconds": 600,
-  "continuousRoundSeconds": 30,
-  "trials": 4,
-  "threads": 12,
-  "gpu": true
-}
-```
-
-600 sekundes ir 10 minūtes. Programma meklē visu norādīto laiku, arī ja
-visas detaļas izvietotas jau agrāk. Viena posma beigās sāk nākamo ar citu
-detaļu secību un leņķu prioritāti. Labākais variants netiek zaudēts, ja
-vēlāks mēģinājums ir sliktāks vai nepabeigts. Beigās saglabā un parāda labāko.
-
-`continuousRoundSeconds` ierobežo vienu meklēšanas posmu. Pēdējam posmam pieejams
-tikai atlikušais kopējais laiks. Kopējais termiņš aptver CPU, GPU un
-sagatavošanas darbu pēc ievades nolasīšanas; tas nesākas no jauna katrai loksnei.
-Ja limits ir ārkārtīgi īss, iespējams rezultāts ar visām detaļām neizvietotām.
-
-Limits ir kooperatīvs: jau sākta OpenCL vai ģeometrijas operācija tiek droši
-pabeigta. Tāpēc procesa faktiskā darbība var būt nedaudz ilgāka par limitu;
-JSON nolasīšana, failu rakstīšana, resursu atbrīvošana un skatītāja atvēršana
-arī aizņem laiku. Tas nav stingrs reāllaika procesa termiņš.
-
-### C. Nepārtraukta meklēšana
-
-```json
-"config": {
-  "mode": "continuous",
-  "continuousRoundSeconds": 30,
-  "trials": 4,
-  "gpu": true
-},
-"output": {
-  "json": "result.json",
-  "dxf": true,
-  "svg": true,
-  "openPreview": false
-}
-```
-
-Startējot šo režīmu, blakus ievades failam izveido vai **iztīra visu `results` mapi**.
-Pirms atkārtotas palaišanas pārkopē vajadzīgos iepriekšējos rezultātus citur.
-Ievades failu nedrīkst glabāt pašā `results` mapē.
-`first` un `timed` režīmi šo mapi automātiski netīra.
-
-Pirmais aprēķinātais variants izveido sākuma atskaites punktu.
-Pēc tam saglabā tikai labākus variantus:
+Install Visual Studio 2022 with **Desktop development with C++**, MSVC x64,
+Windows SDK, CMake and Git. Presets require CMake 3.21 or newer; direct CMake
+configuration requires 3.20 or newer. From the repository root:
 
 ```text
-results/
-  result1.json
-  result1.dxf
-  result1.svg
-  result2.json
-  result2.dxf
-  result2.svg
-```
-
-DXF un SVG rodas tikai tad, ja tie ieslēgti `output`. Failu nosaukumi šajā režīmā
-vienmēr ir `resultN`; `output` norādītie nosaukumi neietekmē numerāciju.
-Katras sesijas numerācija sākas ar 1. Vienādi vai sliktāki rezultāti neveido jaunus failus.
-“Veiksmīgs rezultāts” šeit ir derīgs sākuma variants vai stingrs kvalitātes uzlabojums,
-nevis katrs pabeigtais mēģinājums.
-
-Darbs turpinās arī pēc visu detaļu izvietošanas un pēc posmiem bez uzlabojumiem.
-`timeLimitSeconds` šajā režīmā netiek izmantots kā kopējais limits.
-Ja ieslēgta automātiskā apskate, atver tikai pirmo SVG, lai neradītu jaunu logu
-katram uzlabojumam. Jaunākos variantus atver no `results` mapes.
-
-Ctrl+C un Ctrl+Break pieprasa drošu apturēšanu. Aizverot konsoles logu ar X,
-Windows dod ierobežotu laiku procesa pabeigšanai. Programma mēģina saglabāt
-labāku jau pārbaudītu variantu, bet ilga GPU operācija var nepabeigties šajā laikā.
-Jau publicētie faili paliek pieejami. Task Manager piespiedu apturēšana vai
-strāvas zudums nevar garantēt pašlaik aprēķinātā varianta saglabāšanu.
-
-Failus vispirms pilnībā uzraksta pagaidu nosaukumos; tad publicē SVG/DXF un beigās JSON.
-Galīgais JSON ir pazīme, ka rezultāta komplekts ir gatavs.
-Pēc piespiedu apturēšanas var palikt pagaidu fails vai SVG/DXF bez atbilstoša JSON;
-šādu komplektu neuzskati par pabeigtu rezultātu.
-
-## Pilns ievades piemērs
-
-Visi vadības iestatījumi ir šajā failā; papildu CLI parametri nav nepieciešami.
-
-Repo saknes [input.json](input.json) ir pilnā opciju demonstrācija ar 24 detaļām:
-fiksēts leņķis, atļauto leņķu saraksts, kopējais leņķu režģis ar nobīdi,
-detaļas caurums, taisnstūra loksne un punktu loksne ar caurumu.
-Tas pēc noklusējuma atrod pirmo variantu ar četriem kopējā režģa leņķiem,
-ieslēdz GPU ar CPU rezerves režīmu un saglabā JSON, DXF un SVG.
-`threads: 8` ir piemēra izvēle, nevis programmas noklusējums.
-
-Pilnīguma dēļ šajā failā ir gan `rotations`/`rotationStep`, gan
-`resolution`/`bitmapResolutionMm`, gan `step`/`bitmapSearchStepPx`, kā arī
-`quantity`/`count` un `id`/`name` demonstrācijas. Ikdienas failā atstāj vienu
-attiecīgā iestatījuma rakstības veidu; dublētus iestatījumus nemaini neatkarīgi.
-`name` un `count` tiek izmantoti tikai tad, ja nav attiecīgi `id` un `quantity`.
-
-Visas alternatīvās **vērtības** vienlaikus aktivizēt nevar. Piemēram, `mode`
-var būt tikai viens režīms, `gpu` ir boolean **vai** objekts, `sheet` aizstāj
-`sheets`, bet `angle` un `allowedAngles` pieder atsevišķiem detaļu ierakstiem.
-Zemāk aprakstītas arī šīs formas; režīmu gatavie faili ir `examples` mapē.
-Lai pilno failu mainītu:
-
-- 10 minūtēm: `mode: "timed"`, `timeLimitSeconds: 600`, `continuous: false`.
-- Nepārtrauktam darbam: `mode: "continuous"`, `continuous: true`, `timeLimitSeconds: 0`.
-- 0.1° režģim: `rotationStep: 0.1` un `rotations: 3600`, vai izdzēs `rotations`.
-- Tikai CPU: `gpu.enabled: false`, vai visu objektu aizstāj ar `"gpu": false`.
-
-JSON nepieļauj komentārus vai komatu aiz pēdējā elementa. Lauku nosaukumi un
-režīmu vērtības ir reģistrjutīgas. Raksti skaitļus bez pēdiņām un ar punktu
-decimāldaļai; `true`/`false` ir loģiskās vērtības. Windows ceļus raksti kā
-`"C:/darbs/result.json"` vai ar dubultotām slīpsvītrām `"C:\\darbs\\result.json"`.
-
-Šis īsākais piemērs parāda 10 minūšu režīmu:
-
-```json
-{
-  "units": "mm",
-  "config": {
-    "algorithm": "bitmap",
-    "mode": "timed",
-    "timeLimitSeconds": 600,
-    "continuousRoundSeconds": 30,
-    "rotationStep": 0.1,
-    "resolution": 0.5,
-    "threads": 12,
-    "trials": 4,
-    "step": 1,
-    "curveTolerance": 0.3,
-    "cacheRejects": true,
-    "gpu": {
-      "enabled": true,
-      "device": -1,
-      "fallbackToCpu": true,
-      "batchSize": 65536
-    }
-  },
-  "output": {
-    "json": "result.json",
-    "dxf": "result.dxf",
-    "svg": "result.svg",
-    "openPreview": true
-  },
-  "sheets": [
-    {
-      "id": "board",
-      "quantity": 2,
-      "points": [[0,0],[300,0],[300,200],[0,200]],
-      "holes": [[[140,90],[160,90],[160,110],[140,110]]]
-    }
-  ],
-  "parts": [
-    {
-      "id": "fixed",
-      "quantity": 6,
-      "angle": 45,
-      "points": [[0,0],[30,0],[30,10],[0,10]]
-    },
-    {
-      "id": "restricted",
-      "quantity": 6,
-      "allowedAngles": [0,90,180],
-      "points": [[0,0],[30,0],[30,10],[10,10],[10,30],[0,30]]
-    },
-    {
-      "id": "ring",
-      "quantity": 4,
-      "points": [[0,0],[30,0],[30,30],[0,30]],
-      "holes": [[[10,10],[20,10],[20,20],[10,20]]]
-    }
-  ]
-}
-```
-
-## Detaļas, loksnes un leņķi
-
-| Lauks | Nozīme |
-|---|---|
-| `units` | Tikai `mm`; ja izlaists, pieņem milimetrus |
-| `parts` | Netukšs detaļu tipu masīvs |
-| `sheets` | Netukšs lokšņu masīvs; tā vietā var lietot vienu `sheet` objektu |
-| `points` | Obligāti detaļai; loksnei aizstāj width/height. Kontūras punkti: `[x,y]`, `[x,y,z]` vai `{"x":x,"y":y}` |
-| `holes` | Caurumu kontūru masīvs; katra kontūra ir punktu masīvs vai objekts ar `points` |
-| `id` | Detaļas tipa/loksnes identifikators, teksts vai vesels skaitlis; rezultātā saglabājas kā `source`. Detaļu tipu ID jābūt unikāliem |
-| `name` | Teksta alternatīva `id`, izmanto tikai tad, ja `id` nav. Ja nav abu, ģenerē `part_1`, `part_2` vai `sheet_1`, `sheet_2` |
-| `quantity` | Fizisko kopiju skaits; vesels skaitlis, noklusēti 1. Detaļām 1–100000, loksnēm 1–1000; arī kopējie izvērstie skaiti nedrīkst pārsniegt šīs robežas |
-| `count` | Tikai detaļām: `quantity` alternatīva ar tādām pašām robežām, izmanto tikai tad, ja nav `quantity`. Loksnēm lieto `quantity` |
-| `angle` | Vienīgais atļautais detaļas leņķis grādos |
-| `allowedAngles` | 1–3600 atļauto absolūto leņķu saraksts |
-| `rotation` | Detaļas sākuma leņķa nobīde grādos, noklusēti 0; pieskaita kopējā režģa leņķiem. Nav fiksēta leņķa aizstājējs. Parseris pieņem arī loksnei, bet loksnes pagriešanai to neizmanto |
-| `filename` | Neobligāts teksts, noklusēti tukšs; ģeometrijas metadati. Parseris pieņem detaļai un loksnei. Tas neielādē failu, neietekmē izvietojumu un pašreizējā rezultāta JSON netiek eksportēts |
-| `width`, `height` | Tikai taisnstūra loksnei bez `points`: abi obligāti, pozitīvi izmēri mm līdz 1000000. Nosaka izmantojamo loksnes taisnstūri |
-| `x`, `y` | Taisnstūra loksnes sākuma punkts mm, katrs noklusēti 0. Netiek izmantoti kopā ar loksnes `points`; detaļas pozīciju aprēķina programma |
-
-Taisnstūra loksni var rakstīt īsāk: `"sheet": {"width":300,"height":200}`.
-Loksnei var pievienot `x`, `y`, `holes`, `quantity`.
-Atkārtots pēdējais punkts, kas sakrīt ar pirmo, nav obligāts.
-`[x,y,z]` arī pieņem, bet Z ignorē. Tas nav 3D nesting: ievadei jau jābūt
-projicētai kopējā XY plaknē. Līknes pirms ievades jāpārvērš punktu kontūrās.
-Lietotne nenolasa detaļu kontūras tieši no DXF, STEP vai FreeCAD dokumenta.
-
-Leņķi tiek pielietoti pret ievadītajiem punktiem, pretēji pulksteņrādītāja
-virzienam ap (0,0), pirms pārvietošanas uz izvēlēto pozīciju.
-`angle: 45` nozīmē tikai 45°. `allowedAngles: [0,90]` ļauj izvēlēties vienu
-no diviem leņķiem. Tie aizstāj kopējo rotāciju režģi konkrētajai detaļai.
-Var lietot arī, piemēram, 13.25°. -90 normalizē uz 270; 360 uz 0;
-sarakstus sakārto un izņem dublikātus.
-
-Bez šiem laukiem darbojas `rotation + kopējā režģa leņķis`.
-Nekombinē `angle` ar `allowedAngles` vai kādu no tiem ar nenulles `rotation`.
-Visām `quantity` kopijām ir vienāds ierobežojums; atšķirīgiem kopiju leņķiem
-izmanto atsevišķus ierakstus ar atšķirīgiem `id`.
-Loksnes automātiski netiek rotētas.
-
-Caurumiem jābūt kontūras iekšpusē un savstarpēji nepārklājošiem.
-Atbalstīts viens caurumu līmenis. Gan detaļu, gan lokšņu caurumi saglabājas
-ģeometrijas pārbaudēs, izvades punktos, DXF un SVG.
-
-Saknes `config` un `output` objekti ir neobligāti: izlaižot tos, izmanto
-zemāk norādītos noklusējumus. `parts` un `sheets` masīviem jābūt netukšiem.
-`sheet` ir viens objekts, piemēram, `"sheet": {"width":300,"height":200}`;
-ja norādīti abi, parseris izmanto tikai `sheets`. Neizmanto abus vienā ievadē.
-
-Kontūras ievadē vajag 3–20000 punktus. Secīgi vienādi punkti un atkārtots
-noslēdzošais punkts tiek noņemti; pēc tam vajag vismaz trīs punktus un nenulles
-laukumu. Ārējai kontūrai pēc caurumu atņemšanas jāpaliek pozitīvam materiāla
-laukumam. Tukšs `holes: []` nozīmē, ka caurumu nav; tas ir arī noklusējums.
-Lieto vienkāršas kontūras bez paškrustojumiem un punktus kontūras secībā.
-
-Punktu x/y un visas leņķu/skaitliskās vērtības pieņem tikai galīgus skaitļus
-ar absolūto vērtību līdz 1000000, papildus konkrētā lauka šaurākajām robežām.
-Masīva `[x,y,z]` Z arī tiek pārbaudīts, bet netiek izmantots. Punkta objekts
-izmanto tikai x/y; papildu Z lauks nerada augstumu. Kontūru apejas virzienu
-nav obligāti vienādot — ārējo kontūru un caurumus atšķir to JSON atrašanās vieta.
-
-Nezināmi lauki `config`, `config.gpu` un `output` objektos izraisa kļūdu.
-Papildu saknes, detaļas, loksnes un punkta metadatus parseris var ignorēt;
-tie nekļūst par aprēķina opcijām. Visas atbalstītās ievades opcijas ir šajā README.
-
-## Visi aprēķina iestatījumi
-
-| config lauks | Noklusējums | Diapazons un nozīme |
-|---|---|---|
-| `mode` | `first` | `first`, `timed`, `continuous` |
-| `algorithm` | `bitmap` JSON ievadei | `bitmap` vai atsauces `nfp` |
-| `timeLimitSeconds` | 0 | 0–86400; `timed` vajag pozitīvu vērtību; pieņem daļsekundes |
-| `continuousRoundSeconds` | 30 | 0.01–86400; viena optimizācijas posma limits |
-| `threads` | Datora CPU pavedienu skaits | 1–256; CPU darba budžets |
-| `trials` | 2 | 1–4; stratēģijas vienā posmā; `first` vienmēr izmanto 1 |
-| `rotations` | 4 | 1–3600 vienmērīgi izvietoti leņķi pilnā aplī |
-| `rotationStep` | 90 | Alternatīva `rotations`; 0.1–360°, jādala 360 veselā skaitā |
-| `resolution` | 1 | Pozitīvs milimetru skaits vienā pikselī; alias `bitmapResolutionMm` |
-| `step` | 1 | 1–100000; smalkās meklēšanas minimālais solis pikseļos; alias `bitmapSearchStepPx` |
-| `curveTolerance` | 0.3 | Nenegatīva kontaktu priekšlikumu vienkāršošanas pielaide mm |
-| `cacheRejects` | true | Atcerēties nederīgās rastra pozīcijas |
-| `gpu` | false | Boolean vai OpenCL konfigurācijas objekts |
-| `spacing` | 0 | Pašlaik pieņem tikai 0; nenulles vērtība izraisa kļūdu |
-| `continuous` | false | Vecais režīma alias; jaunai ievadei lieto `mode` |
-
-### Kāpēc vajadzīgs katrs aprēķina iestatījums
-
-- **`mode`** izvēlas darba ilgumu un saglabāšanas darbību. `first` der ātrai
-  izvietošanai, `timed` — optimizēšanai ar noteiktu budžetu, `continuous` —
-  ilgai meklēšanai ar uzlabojumu vēsturi. Automātiskā režīma izvēle bez šī
-  lauka ir izskaidrota saderības sadaļā.
-- **`algorithm`** izvēlas rastra meklētāju `bitmap` vai iepriekšējo no-fit
-  polygon algoritmu `nfp`. Bitmap opcijas nedod tādu pašu funkcionalitāti NFP;
-  jaunajiem režīmiem izvēlies `bitmap`.
-- **`timeLimitSeconds`** nosaka kopējo timed optimizēšanas laiku sekundēs.
-  600 ir 10 minūtes, 3600 — stunda. `first` izmanto 0; `continuous` šo kopējo
-  limitu ignorē. Eksportēšana var notikt pēc aprēķina termiņa.
-- **`continuousRoundSeconds`** dod vienam atkārtojumam iespēju pabeigt darbu,
-  vienlaikus ļaujot sākt jaunu secību un stratēģiju. Pārāk maza vērtība var
-  tērēt laiku atkārtotai sagatavošanai. Tā darbojas gan timed, gan continuous;
-  `first` to neizmanto.
-- **`threads`** ierobežo CPU meklēšanas darba pavedienu budžetu. Izlaižot,
-  izmanto aparatūras norādīto loģisko procesoru skaitu (vismaz 1). Mazāka
-  vērtība atstāj vairāk CPU citām programmām. GPU draivera un sistēmas pavedieni
-  šajā budžetā neietilpst; ne visos aprēķina posmos visu budžetu var izmantot.
-- **`trials`** nosaka, cik no četrām stratēģijām izmēģina vienā posmā:
-  1 — compact; 2 — arī pair_rows; 3 — arī large_first; 4 — arī small_first.
-  Stratēģijas var darboties paralēli atbilstoši threads budžetam. Vairāk
-  stratēģiju palielina iespēju atrast citu izvietojumu, bet arī darbu un atmiņu.
-  `first` un uzdevumiem ar mazāk nekā 6 detaļu kopijām izmanto vienu stratēģiju.
-- **`rotations`** ir vienmērīgi sadalītu orientāciju skaits, nevis leņķis:
-  4 nozīmē 0°, 90°, 180°, 270°; 3600 nozīmē ik pa 0.1°. Samazināšana
-  būtiski samazina aprēķinu. Detaļas angle/allowedAngles šo režģi aizstāj.
-- **`rotationStep`** ļauj to pašu norādīt grādos. Noklusētais četru rotāciju
-  režģis atbilst 90°. 1° dod 360 orientācijas, 0.1° — 3600. Piemēram, 7°
-  nav derīgs, jo 360/7 nav vesels skaitlis. Ar `rotations` jābūt saskaņotam.
-- **`resolution` / `bitmapResolutionMm`** nosaka viena rastra pikseļa izmēru
-  mm; diapazons ir `(0; 1000000]`. Mazāka vērtība ļauj smalkāk meklēt pozīcijas,
-  taču palielina rastru un atmiņas patēriņu. Samazinot pikseļa malu uz pusi,
-  vienāda laukuma rastrā ir aptuveni četras reizes vairāk pikseļu. Tā nav
-  detaļu mērogošana un nav garantēta griešanas pielaide.
-- **`step` / `bitmapSearchStepPx`** ir smalkās rastra meklēšanas minimālais
-  translācijas solis pikseļos. Fiziskais solis ir step × resolution mm.
-  Lielāks solis var paātrināt meklēšanu, bet izlaist derīgas šauras pozīcijas.
-  Rupjās un kontaktu meklēšanas posmi var izmantot citus soļus.
-- **`curveTolerance`** ir kontaktu priekšlikumu kontūru vienkāršošanas pielaide
-  mm no 0 līdz 1000000. Mazāka vērtība saglabā vairāk sīku kontūras pazīmju
-  priekšlikumu ģenerēšanai; lielāka var samazināt šo darbu. 0 neatļauj pozitīvu
-  vienkāršošanas pielaidi. Oriģinālie eksporta punkti no tā nemainās;
-  šī opcija nepārvērš DXF lokus par punktiem un nenosaka atstarpi starp detaļām.
-- **`cacheRejects`** ieslēdz nederīgo rastra pozīciju kešu, lai tās atkārtoti
-  nepārbaudītu tajā pašā aizpildījuma stāvoklī. Ieslēgts var ietaupīt aprēķinu,
-  izslēgts samazina šī keša atmiņu. Tas ir boolean, nevis keša apjoma iestatījums.
-- **`spacing`** ir rezervētais atstarpes lauks; pašlaik der tikai skaitlis 0.
-  Programma nekompensē instrumenta diametru vai griezuma platumu.
-- **`continuous`** ir boolean saderībai ar veciem ievades failiem.
-  Ja `mode` norādīts, `continuous` jābūt true tieši continuous režīmā un false
-  abos pārējos. Ja lieto tikai mode, šo dublējošo lauku var izlaist.
-- **`gpu`** nosaka OpenCL sadursmju pārbaudes izmantošanu; visi tā apakšlauki
-  un to darbība aprakstīti nākamajā sadaļā.
-
-Alias pāru `resolution`/`bitmapResolutionMm` un `step`/`bitmapSearchStepPx`
-atšķirīgas vērtības netiek īpaši noraidītas: pašreizējais parseris īso nosaukumu
-apstrādā pēdējo, un tas uzvar. Nepaļaujies uz to — saglabā vienu nosaukumu
-vai vienādas vērtības, kā pilnajā piemērā.
-
-Ja ir gan `rotations`, gan `rotationStep`, tiem jāapraksta vienāds režģis.
-`rotationStep: 0.1` nozīmē 3600 leņķus no 0 līdz 359.9°.
-Smalkāka leņķa precizitāte nemaina telpisko `resolution`.
-
-`nfp` ir iepriekšējais atsauces algoritms. Tas nepiedāvā jaunos timed/continuous,
-GPU vai `angle/allowedAngles` režīmus; pretrunīga kombinācija izraisa kļūdu.
-Šai lietotnes darbplūsmai izmanto `bitmap`.
-
-## GPU un CPU
-
-| config.gpu lauks | Noklusējums objektā | Nozīme |
-|---|---|---|
-| `enabled` | true | Ieslēgt OpenCL |
-| `device` | -1 | Automātiski dot priekšroku diskrētai GPU; citādi ierīces indekss |
-| `fallbackToCpu` | true | GPU kļūmes gadījumā turpināt CPU un paziņot iemeslu |
-| `batchSize` | 65536 | 256–262144 GPU kandidāti vienā partijā |
-
-- `enabled` ir boolean: false izslēdz GPU arī tad, ja pārējie GPU iestatījumi
-  paliek objektā; true mēģina inicializēt ierīci. Tukšs objekts `{}` to ieslēdz.
-- `device` ir vesels skaitlis no -1 līdz 1024. -1 izvēlas automātiski;
-  0, 1 utt. ir tieši `--list-gpus` izdrukas indeksi, nevis Windows Task Manager
-  numerācija. Manuāla izvēle noder datoram ar integrēto un diskrēto GPU.
-  Konkrētajam indeksam jābūt pieejamo ierīču sarakstā.
-- `fallbackToCpu` ir boolean: true ļauj turpināt, ja nav OpenCL, izvēlētās
-  ierīces vai GPU darbībā rodas kļūme. False pieprasa GPU un šādu kļūmi
-  padara par aprēķina kļūdu; tas ir noderīgi, ja gribi pamanīt neaktīvu GPU.
-- `batchSize` ir vesels skaitlis — vienā paketē GPU nosūtīto kandidātu limits.
-  Lielākas partijas var samazināt daudzu mazu palaišanu izmaksas, bet palielina
-  buferus un vienas operācijas aizkavi. Faktiskā partija var būt mazāka.
-
-`gpu: true` ir īsā forma automātiskai izvēlei ar CPU rezerves režīmu.
-`gpu: false` neielādē OpenCL. Ierīču sarakstu apskati ar
-`./deepnestcpp.exe --list-gpus`, izvēlēto indeksu ieraksti JSON.
-Vajadzīgs videokartes draiveris ar OpenCL. CUDA Toolkit un citu nesting projektu
-DLL nav vajadzīgi; draivera `OpenCL.dll` netiek pievienots komplektam.
-
-GPU pārbauda daudzu rastra kandidātu sadursmes. CPU sagatavo ģeometriju,
-kontaktus, novērtē pozīcijas, precīzi pārbauda kontūras un pieņem izvietojumus.
-Katra jau izvietota detaļa ietekmē nākamo, tāpēc šīs darbības nav pilnībā
-paralēlas. 100% CPU/GPU slodze nav garantēta un pati par sevi nenozīmē
-labāku rezultātu. Darbs, ko atrisina kontaktu priekšlikumi, var neizsaukt GPU
-kodolu vispār. Mazus piemērus GPU palaišanas izmaksas var palēnināt.
-
-## Izvades iestatījumi
-
-Visi šie lauki ir saknes objektā `output`, līdzās `config`, `parts` un `sheets`.
-
-| output lauks | Noklusējums | Nozīme |
-|---|---|---|
-| `json` | `"result.json"` | Rezultāta JSON ceļš; JSON izvade ir obligāta |
-| `dxf` | false | `true` → result.dxf; false izslēdz; var norādīt ceļa tekstu |
-| `svg` | false | `true` → result.svg; false izslēdz; var norādīt ceļa tekstu |
-| `openPreview` | false | Atvērt SVG noklusētajā Windows skatītājā; vajag ieslēgtu `svg` |
-
-JSON ceļi ir relatīvi ievades mapē vai absolūti. Trūkstošas izvades apakšmapes
-first/timed režīmā tiek izveidotas. Neizmanto vienu failu ievadei un izvadei
-vai vairākiem formātiem; programma šādas sakritības noraida.
-SVG ir vienkāršs vizuāls pārskats ar loksnēm, krāsainām detaļām un caurumiem.
-Uzvedot peli uz detaļas, skatītājs var parādīt tās ID un leņķi.
-Ražošanai un integrācijai izmanto pilnos JSON/DXF datus.
-
-`json` vajadzīgs integrācijai un pilnajam izvietojuma aprakstam; to nevar
-izslēgt ar false. `dxf` ieslēdz CAD apmaiņas failu, `svg` — attēlu ātrai
-apskatei. Abu boolean forma true lieto noklusēto faila nosaukumu **ievades
-mapē**, nevis automātiski atvasina nosaukumu no `output.json`. Ceļa teksta forma
-ļauj katram formātam izvēlēties savu atrašanās vietu. Tukšs ceļš nav derīgs.
-`openPreview` neatver JSON vai CAD — tas atver tikai SVG. False ir piemērots
-automatizētai palaišanai, kur papildu logs nav vajadzīgs. First/timed režīmā
-esošie izvades faili tiek pārrakstīti; vēsturei izmanto continuous vai jaunus ceļus.
-
-Nepārtrauktās meklēšanas mape ir fiksēta `results` ievades mapē. Saites un
-Windows junction mapes tās iekšpusē tiek noraidītas pirms tīrīšanas.
-Procesa slēdzene neļauj otrai sesijai tajā pašā mapē izdzēst aktīvās sesijas
-rezultātus. Vienlaicīgām sesijām izmanto atsevišķas ievades mapes.
-
-## Rezultāta JSON lasīšana
-
-- `placed`, `unplacedCount`: izvietoto un neizvietoto fizisko kopiju skaits.
-- `sheets[].parts`: detaļas katrā izmantotajā loksnē.
-- Detaļas `id` ir unikāls kopijas skaitlis; `source` saglabā ievades tipa ID.
-- `x`, `y`, `rotation`: pārvietojums un leņķis pret ievadīto kontūru.
-- `points`, `holes`: **jau transformētas absolūtās koordinātas**.
-  Tās atkārtoti nerotē un nepārvieto.
-- `unplaced`: visas atlikušās kopijas, arī tās, kuras termiņa dēļ vēl nepaspēja mēģināt.
-- `mode`, `timeLimitSeconds`, `timeLimitReached`, `stopReason`: meklēšanas režīms un pārtraukšanas iemesls.
-- `stopReason`: completed, time_limit vai user_stop. Continuous failā tas
-  raksturo konkrēto variantu, nevis nozīmē, ka visa sesija jau beigusies.
-- `timingMs`: kopējais meklēšanas/orķestrācijas laiks; bez izvades failu rakstīšanas.
-- `searchIteration`: posms, kurā atrasts saglabātais variants, sākot no 0.
-- `trials`, `startedTrials`, `selectedTrial`, `workersUsed`,
-  `proposalWorkersPerTrial`: stratēģiju un pavedienu diagnostika.
-- `gpu.requested/used/device/batches/candidates/fallbackReason`: GPU diagnostika.
-  used=true nozīmē, ka tiešām palaists GPU kodols. Timed gala GPU skaitītāji aptver
-  visus posmus; continuous uzlabojuma failā tie raksturo kandidāta stratēģiju.
-- `usedSheetWasteArea`: neizmantotais materiāls izmantotajās loksnēs mm²,
-  neieskaitot lokšņu caurumus un pilnīgi neizmantotas loksnes.
-- `occupiedBoundsArea`, `compactWasteArea`: rastra ietverošo taisnstūru
-  laukums un neizmantotais laukums tajos.
-- `utilisation`: vēsturiskais procentu rādītājs pret stratēģijā apstrādāto
-  lokšņu materiāla laukumu; tas nav vienīgais kvalitātes kritērijs.
-
-## Kā tiek atrasts un izvēlēts labākais variants
-
-Bitmap algoritms veido loksnes aizpildījuma rastru, izmēģina robežu un kontūru
-kontaktu pozīcijas, pārbauda sadursmes, vajadzības gadījumā paplašina meklēšanas
-apgabalu un veic smalkāku meklēšanu. Pieņemto detaļu izvietojumu pārbauda arī
-ar oriģinālo ģeometriju. Kontūru vienkāršošana palīdz izveidot priekšlikumus,
-bet nemaina eksportēto detaļu formu.
-
-Pirmajā optimizācijas posmā stratēģijas ir compact, pair_rows, large_first,
-small_first; pieejamo skaitu nosaka trials. Ļoti maziem darbiem ar mazāk nekā
-6 detaļām pietiek ar vienu stratēģiju. Nākamajos posmos maina detaļu secību un
-atļauto leņķu izmēģināšanas prioritāti. Tie ir heuristiski mēģinājumi, nevis
-globālā optimuma pierādījums.
-
-Timed/continuous režīmi salīdzina rezultātus secīgi:
-1. Mazāk neizvietotu detaļu.
-2. Mazāks usedSheetWasteArea.
-3. Mazāks compactWasteArea.
-
-Tātad rezultātu nevar “uzlabot”, vienkārši izmetot detaļas.
-Ja visas tās pašas detaļas jau atrodas tajās pašās loksnēs, kopējais atkritumu
-laukums ir nemainīgs. Pārkārtošana tad uzlabo kompaktumu un atlikumu formu,
-nevis kopējo atkritumu kvadrātmilimetru skaitu. Skaitliski līdzvērtīgi rezultāti
-netiek uzskatīti par uzlabojumiem.
-
-## Ātrdarbība un robežas
-
-- Ja detaļas drīkst rotēt tikai dažos leņķos, norādi allowedAngles.
-- Sāc ar rotationStep 90 vai 1; 0.1 var ievērojami palielināt darbu.
-- Mazāka resolution uzlabo telpisko precizitāti, bet prasa vairāk atmiņas un aprēķinu.
-- Lielāks trials dod vairāk variantu, taču arī lielākas izmaksas.
-- Virs 64 atļautajiem leņķiem izmanto papildu CPU palīgus stratēģijas ietvaros.
-- Ja īss posms beidzas tikai ar sagatavošanu, palielini continuousRoundSeconds.
-- Lielāka GPU partija ne vienmēr ir ātrāka; salīdzini laiku un izvietojuma kvalitāti.
-
-Ievades robežas: JSON līdz 64 MiB, līdz 100000 detaļu kopijām, 1000 lokšņu
-kopijām, 20000 punktiem kontūrā; koordinātu absolūtā vērtība līdz 1000000 mm.
-Atmiņas robežas atsevišķi aizsargā rastru. Pikseļu kešatmiņai paredzēti ap
-64 MiB uz stratēģiju/loksni, nederīgo pozīciju kešam līdz 32 MiB. Ģeometrija
-un citi dati ir papildu izmaksas. GPU masku buferis ierobežots līdz 512 MiB
-un ierīces pieļaujamajam apjomam.
-
-Nav ražošanas atstarpes/kerf kompensācijas: spacing pašlaik jābūt 0.
-Rastra precizitāte var izslēgt zem pikseļa izmēra ietilpšanu.
-Nav garantēts globāli optimāls izvietojums vai turpmāki uzlabojumi.
-
-## Biežas situācijas
-
-| Situācija | Rīcība |
-|---|---|
-| Logs uzreiz aizveras | Palaid run.cmd vai no termināļa un izlasi kļūdu |
-| Nav pirmā rezultāta ļoti īsā posmā | Palielini continuousRoundSeconds; sagatavošana arī patērē laiku |
-| GPU used=false | Iespējams, kontakti atrisināja darbu bez GPU; apskati fallbackReason |
-| GPU nav atrasta | Atjaunini draiveri, pārbaudi --list-gpus vai atļauj fallbackToCpu |
-| Rezultāts satur neizvietotas detaļas | Pārbaudi lokšņu izmērus, caurumus, leņķus, resolution un laika limitu |
-| Vecie rezultāti pazuda | Continuous režīms apzināti tīra results katrā jaunā sesijā |
-| Results directory already in use | Apturi otru sesiju vai izmanto citu ievades mapi |
-| SVG neatveras automātiski | Atver saglabāto SVG pārlūkā; pārbaudi Windows failu asociāciju |
-| FreeCAD nelasa DXF | Pārbaudi, ka atver tieši DXF, nevis pārsauktu JSON |
-| “Unknown ... option” | Pārbaudi JSON lauka nosaukumu un atrašanās vietu |
-
-Iziešanas kods 0 nozīmē veiksmīgu aprēķinu vai drošu lietotāja apturēšanu,
-arī daļēja rezultāta gadījumā. Kods 1 nozīmē ievades, failu vai aprēķina kļūdu.
-Piespiedu Windows procesa izbeigšana var dot citu OS noteiktu kodu.
-
-## Iepriekšējo konfigurāciju saderība
-
-Ja mode nav norādīts: continuous=true izvēlas continuous; citādi pozitīvs
-timeLimitSeconds izvēlas timed; bez tiem izmanto first.
-Pretrunīgs mode un continuous tiek noraidīts. **Laika režīms tagad optimizē
-visu norādīto laiku**, nevis apstājas pēc sākotnējo stratēģiju pabeigšanas.
-
-### Visas JSON lietotnes komandrindas opcijas
-
-| Arguments | Vērtība un darbība |
-|---|---|
-| `--input path` | Ievades JSON; noklusēti `input.json` darba mapē |
-| `--output path` | Pārraksta JSON izvades ceļu; `.dxf` paplašinājumam izvada DXF un tāda paša nosaukuma JSON |
-| `--dxf path` | Ieslēdz DXF un pārraksta tā ceļu |
-| `--threads N` | Pārraksta config.threads, vesels skaitlis 1–256 |
-| `--trials N` | Pārraksta config.trials, vesels skaitlis 1–4; first tāpat izmanto vienu |
-| `--rotations N` | Pārraksta kopējā režģa rotāciju skaitu, vesels skaitlis 1–3600 |
-| `--list-gpus` | Parāda OpenCL GPU indeksus, nosaukumus, ražotāju un atmiņu MiB, pēc tam beidz darbu; ievades fails nav vajadzīgs |
-| `--help`, `-h` | Parāda īso lietošanas palīdzību un beidz darbu |
-
-JSON vispirms tiek pilnībā pārbaudīts, pēc tam piemēro CLI pārrakstījumus.
-Tātad argumenti neizlabo savstarpēji pretrunīgu JSON konfigurāciju.
-GPU, režīms, laika limits un SVG jānorāda JSON; tiem nav atsevišķu CLI slēdžu.
-CLI ceļi ir relatīvi procesa darba mapei; JSON ceļi — ievades mapei.
---output layout.dxf raksta īstu DXF un blakus layout.json.
-Lieto vienu konfigurācijas avotu ikdienas darbā, lai izvairītos no nejaušiem pārrakstījumiem.
-
-## Windows kompilācija
-
-Nepieciešams CMake 3.21 vai jaunāks gatavajiem presets (tiešam CMake minimums
-ir 3.20), Visual Studio 2022 ar **Desktop development with C++**, MSVC x64,
-Windows SDK un Git atkarības lejupielādei. Kompilators izmanto C++20.
-Repo `build-release.ps1` sagatavo Release būvējumu:
-
-```powershell
-git clone https://github.com/ingussp/CLI-nesting.git
-cd CLI-nesting
-./build-release.ps1
-./run.cmd
-```
-
-Skripts palaiž CMake konfigurēšanu un paralēlu kompilāciju. Rezultāts:
-`build-release/Release/deepnestcpp.exe`. `run.cmd` izmanto repo saknes input.json.
-Tieša palaišana no repo saknes:
-
-```powershell
-./build-release/Release/deepnestcpp.exe --input ./input.json
-./build-release/Release/deepnestcpp.exe --list-gpus
-```
-
-Alternatīvi bez skripta:
-
-```powershell
 cmake --preset windows-release
 cmake --build --preset windows-release --parallel
+build-release\Release\clinesting.exe --input input.json
 ```
 
-MSVC runtime noklusēti piesaista statiski (`DEEPNEST_STATIC_RUNTIME=ON`),
-lai lietotnes izplatīšanai nebūtu atsevišķi jāpievieno MSVC runtime DLL.
-To var izslēgt konfigurēšanā ar `-DDEEPNEST_STATIC_RUNTIME=OFF`, ja būvēšanas
-videi nepieciešams dinamisks runtime. OpenCL draiveris joprojām ir vajadzīgs GPU.
-Vecais demonstrācijas izpildfails `deepnestcpp_demo.exe` nav JSON lietotne;
-ikdienas darbam izmanto `deepnestcpp.exe` un šeit dokumentētos argumentus.
+The preset selects Visual Studio 2022, x64 and Release. Equivalent direct commands:
 
-Pirmajā konfigurēšanā CMake lejupielādē Clipper2 1.5.4. Ja tā pirmkods jau ir
-pieejams lokāli, var konfigurēt bez šīs lejupielādes:
+```text
+cmake -S . -B build-release -G "Visual Studio 17 2022" -A x64 -DCLINESTING_STATIC_RUNTIME=ON
+cmake --build build-release --config Release --parallel
+```
 
-```powershell
+`CLINESTING_STATIC_RUNTIME=ON` is the default. OFF selects a shared MSVC runtime
+for distributions that require it. The JSON executable is
+`build-release/Release/clinesting.exe`. The separate `clinesting_demo.exe`
+is a historical demonstration, not the JSON application documented here.
+
+CMake downloads Clipper2 1.5.4 during initial configuration. Its utilities,
+examples and tests are disabled. To use an existing offline source checkout:
+
+```text
 cmake --preset windows-release -DFETCHCONTENT_SOURCE_DIR_CLIPPER2=C:/deps/Clipper2
 cmake --build --preset windows-release --parallel
 ```
 
-Norādītajā mapē jābūt Clipper2 repo saknei ar `CPP` apakšmapi un atbilstošo
-1.5.4 versiju. Šajā izstrādes posmā kompilē **tikai Windows x64**.
-Linux būvējums paredzēts vēlāk; OpenCL izvēle saglabā šādas pārnešanas iespēju.
+The path must identify the Clipper2 1.5.4 repository root containing `CPP`.
+JSON and OpenCL headers are vendored. The GPU runtime comes from the graphics
+driver; CUDA and DLLs from other nesting applications are not required.
 
-## Projekta uzbūve un bibliotēkas
+## Run a job
 
-- demo/json_main.cpp: JSON CLI, režīmu izvēle, signāli un izvade.
-- src/json_io.cpp: ievades pārbaudes un rezultāta JSON.
-- src/bitmap_nesting.cpp: izvietošana, stratēģijas, rastrs un CPU/GPU sadarbība.
-- src/continuous_nesting.cpp: timed/continuous atkārtojumi un labākā varianta izvēle.
-- demo/continuous_results.hpp: numurētā izvade, procesa slēdzene un droša mapes tīrīšana.
-- demo/svg_preview.hpp: punktu ģeometrijas SVG priekšskatījums.
-- src/gpu_bitmap.cpp: OpenCL ierīce, buferi un kodoli.
-- src/geometry.cpp, src/nfp.cpp: precīzās ģeometrijas darbības.
+Edit [input.json](input.json) and run the executable, or use
+`clinesting.exe --input C:/jobs/input.json`. Without arguments it reads
+`input.json` in the current working directory. `run.cmd` changes to its own
+directory and finds the executable there or in `build-release/Release`.
 
-Clipper2 1.5.4 tiek nodrošināts ar CMake FetchContent (Boost Software License 1.0).
-Sākotnējai lejupielādei nepieciešams tīkls, ja nav lokālu atkarību.
-nlohmann/json 3.11.3 ir repozitorijā ar MIT licenci.
-Khronos OpenCL-Headers v2024.10.24 ir repozitorijā ar Apache-2.0 licenci.
-OpenCL izpildbibliotēku nodrošina GPU draiveris.
-Saglabā trešo pušu licences, izplatot būvējumus. Citu nesting projektu DLL
-šī lietotne neizmanto.
+Read the console summary and the saved JSON/DXF/SVG. All relative JSON output
+paths are resolved beside the input file, even when the executable is elsewhere.
+
+Examples: [complete configuration](input.json),
+[FreeCAD export](examples/freecad-input.json),
+[first layout](examples/mode-first.json),
+[ten-minute search](examples/mode-timed.json),
+[continuous search](examples/mode-continuous.json),
+[0.1-degree rotations](examples/rotation-0.1.json).
+
+## FreeCAD input and configuration precedence
+
+Supported FreeCAD fields include `schema_version: 1`, `settings`, sheet `outer`,
+part `rotations`, `output.resultJson`, and `_ip_nesting` metadata. Existing CLI
+`config`, `points`, and `output.json` inputs remain supported.
+
+Configuration objects are merged in this order; later values override earlier
+values for the same option:
+
+1. `settings`: shared FreeCAD options and supported CLI search settings.
+2. `config`: the original CLI configuration object.
+3. `CLI-nesting`: an optional dedicated CLI configuration object.
+
+Use one search configuration object in normal jobs. Shared physical options
+`units`, `spacing`, `partToSheet`, and `partToHole` can remain in `settings`.
+The root input example demonstrates that arrangement.
+
+The following legacy keys are ignored **only inside settings**:
+`placementType`, `simplify`, `useSvgPreProcessor`, `scale`, `endpointTolerance`,
+`dxfImportScale`, `dxfExportScale`, `exportWithSheetBoundboarders`,
+`exportWithSheetsSpace`, `exportWithSheetsSpaceValue`, `mergeLines`, `timeRatio`,
+`populationSize`, `mutationRate`, `useQuantityFromFileName`.
+They do not scale geometry, merge cutting lines or configure this optimizer.
+Replace/remove them when updating the exporter. Other unknown configuration
+keys are rejected, including these legacy keys in config or CLI-nesting.
+
+`autoStart` is informational: invoking the CLI always starts a job. Paths in
+`filename` or `_ip_nesting` are metadata and are not opened to import geometry.
+`_ip_nesting.result_file` does not override the output settings. `job_id`,
+`created_at`, and root/per-object `_ip_nesting` are copied to output when present.
+FreeCAD grain and 3D placement metadata do not rotate the supplied XY geometry;
+export the intended rotation rule explicitly using angle, allowedAngles or rotations.
+
+## Root fields
+
+JSON names and string values are case-sensitive. Use numbers without quotes,
+decimal points, and boolean true/false. Comments and trailing commas are invalid.
+Windows paths can use `C:/jobs/result.json` or doubled backslashes.
+
+| Field | Default / requirement | Purpose |
+|---|---|---|
+| `schema_version` | Optional; only 1 | FreeCAD schema identifier |
+| `units` | mm | Only millimetres are supported |
+| `settings.units`, `_ip_nesting.units` | mm if absent | Units, when provided, must agree with mm |
+| `job_id` | Optional string | Correlates exported jobs and results |
+| `created_at` | Optional string | Retained creation timestamp; does not control execution |
+| `_ip_nesting` | Optional JSON metadata | Retains FreeCAD mapping information |
+| `settings`, `config`, `CLI-nesting` | Optional objects | Configuration layers described above |
+| `parts` | Required nonempty array | Part types, point geometry and quantities |
+| `sheets` | Required nonempty array unless sheet is used | Available stock definitions |
+| `sheet` | Alternative single object | Short form for one stock definition; sheets wins if both are supplied |
+| `output` | Optional object | Export formats, filenames and preview behavior |
+| `autoStart` | Ignored | Compatibility metadata for interactive exporters |
+
+Additional root/geometry metadata may be ignored. Only documented fields affect
+nesting. Unknown search, GPU and output options are errors.
+
+## Parts, sheets and contours
+
+| Field | Default / valid values | Purpose |
+|---|---|---|
+| `points` | Required for a part unless outer is supplied | Ordered outer boundary |
+| `outer` | Alias of points | FreeCAD polygon contour; also accepted for parts and hole objects |
+| `holes` | Empty array | Hole contours; each item is a point array or an object with points/outer |
+| `width`, `height` | Positive numbers up to 1000000 mm | Rectangle shorthand for sheets without a point contour |
+| `x`, `y` | Each 0 | Origin of a rectangle sheet; not used with its points/outer |
+| `id` | String or integer | Part type/sheet identifier; output preserves it as source |
+| `name` | Optional string | Fallback identifier if id is absent |
+| `quantity` | Integer, default 1 | Copies: parts 1..100000; sheets 1..1000 |
+| `count` | Part-only quantity alias | Used only when quantity is absent; same limits |
+| `filename` | Empty string | Metadata only; does not read a DXF and is not currently exported |
+| `_ip_nesting` | Optional metadata | Copied to placed/unplaced copies and sheet results |
+| `type` | Informational | FreeCAD usually sends polygon; actual point data controls behavior |
+| `rotation` | 0 degrees | Initial part angle offset added to its uniform grid |
+| `rotations` | Global grid when omitted | Part-only integer 1..3600; a uniform grid for this part |
+| `angle` | Unset | One absolute permitted part angle |
+| `allowedAngles` | Unset | Array of 1..3600 absolute permitted part angles |
+
+Use points or outer. If both exist they must contain identical JSON values.
+A contour takes precedence over sheet width/height. Parts require contours;
+rectangle shorthand applies only to sheets. Sheet `angle`, `allowedAngles` and
+`rotations` are rejected. A legacy sheet rotation is read but does not rotate stock.
+
+Points accept `[x,y]`, `[x,y,z]` or `{"x":x,"y":y}`. Array Z is validated but
+ignored; point objects use x/y only. This is 2D nesting: project geometry to XY
+and approximate curves with points before exporting. DXF, STEP and FreeCAD
+documents are not directly imported.
+
+Each contour needs 3..20000 input points. Consecutive duplicates and an optional
+closing copy of the first point are removed. At least three points and nonzero
+area must remain. Use simple, non-self-intersecting contours in boundary order.
+Holes must lie within the outline, must not overlap each other, and must leave
+positive material area. One hole level is supported. Winding direction does not
+determine holes; their JSON location does.
+
+Numeric values must be finite and have magnitude at most 1000000, subject to
+narrower field limits. File size is limited to 64 MiB; expanded totals are at
+most 100000 parts and 1000 sheets. Part type IDs must be unique. Missing id/name
+becomes part_1, part_2, sheet_1, etc. Each physical copy receives a numeric ID.
+
+### Rotation rules
+
+Angles are degrees counterclockwise about the input origin, applied before the
+reported translation. `angle: 45` permits only 45 degrees;
+`allowedAngles: [0,90]` permits either orientation. Arbitrary angles such as
+13.25 are accepted; negatives are normalized into [0,360), and absolute-list
+duplicates are removed.
+
+Part `rotations: 1` permits only its rotation offset, default 0, matching the
+FreeCAD example. Part rotations 4 permits offset + 0,90,180,270. Without a
+part-specific rule, the global grid is used. All quantity copies share one rule;
+use separate part records for different copy orientations.
+
+Do not combine part rotations with angle/allowedAngles; do not combine angle
+with allowedAngles; and do not combine absolute angles with nonzero rotation.
+
+## Three independent clearances
+
+All three distances are in millimetres, default to 0, and accept 0..1000000.
+Nonzero clearances require algorithm bitmap.
+
+| Setting | Measured between | Purpose |
+|---|---|---|
+| `spacing` | Outer boundaries of different parts | Cutting gap between neighboring parts |
+| `partToSheet` | Part outer boundary and sheet outer boundary | Stock margin, including concave edges |
+| `partToHole` | Part boundaries and sheet-hole boundaries; also boundary pairs involving holes in another part | Clearance to cutouts and when nesting inside a part hole |
+
+`sheetSpacing` and `holeSpacing` are aliases of partToSheet and partToHole.
+Conflicting aliases in one object are rejected. Prefer the FreeCAD spellings.
+
+```json
+"settings": {"units":"mm", "spacing":5, "partToSheet":5, "partToHole":2}
+```
+
+Spacing 5 requests a 5 mm gap, not a doubled half-offset. The three rules are
+independent: all applicable boundary pairs must satisfy their own limits.
+Zero permits touching but never overlapping forbidden material. Positive gaps
+reject contact. Numerical tolerance near the exact requested distance is at
+most 0.0000001 mm.
+
+Bitmap/GPU checks eliminate collisions; exact original-polygon CPU validation
+then checks containment, overlap and Euclidean edge distances. Neighbor lookup
+includes the gap even when bounding boxes do not touch. Search also proposes
+spaced rows/columns. Exported contours are unchanged: these settings do not
+enlarge parts, shrink exported sheets or generate compensated toolpaths.
+Raster resolution can produce larger achieved gaps or miss narrow feasible spaces.
+
+## All search options
+
+These keys are accepted in settings, config or CLI-nesting.
+
+| Field | Default | Valid values and purpose |
+|---|---|---|
+| `algorithm` | bitmap | bitmap is the current CPU/OpenCL optimizer. nfp is a reference algorithm without nonzero clearances, GPU, timed/continuous modes or part-specific angles |
+| `mode` | Inferred, normally first | first, timed, continuous; controls duration and saving behavior below |
+| `timeLimitSeconds` | 0 | 0..86400, including fractions; timed requires a positive total budget, first requires 0, continuous ignores it |
+| `continuousRoundSeconds` | 30 | 0.01..86400; budget per timed/continuous restart. Too short can spend every restart on preparation |
+| `continuous` | false | Legacy boolean; without mode, true selects continuous. With mode it must agree: true only for continuous |
+| `rotations` | 4 | Global uniform orientation count, integer 1..3600; more angles increase work. Per-part rules override it |
+| `rotationStep` | 90 for the default grid | 0.1..360 degrees; 360/step must be an integer. 0.1 gives 3600 angles up to 359.9. If rotations is also supplied the grids must agree |
+| `threads` | Hardware logical CPU count, at least 1 | Explicit integer 1..256; CPU search worker budget. Driver/OS threads are separate and serial phases cannot use all workers |
+| `trials` | 2 | Integer 1..4: compact, then pair_rows, large_first, small_first. More strategies cost more time/memory. First mode and jobs with fewer than six copies use one |
+| `resolution` | 1 mm/pixel | Positive number up to 1000000. Finer pixels increase precision and memory; halving pixel size roughly quadruples raster area. Does not scale geometry |
+| `bitmapResolutionMm` | Alias of resolution | Same range; prefer one spelling. If both exist, resolution wins in the current parser |
+| `step` | 1 pixel | Integer 1..100000; minimum fine-search translation step. Physical step is step × resolution. Larger steps can skip feasible pockets |
+| `bitmapSearchStepPx` | Alias of step | Same range; prefer one spelling. If both exist, step wins |
+| `curveTolerance` | 0.3 mm | 0..1000000; contact-proposal contour simplification tolerance. Smaller retains more detail and costs more work. Original validation/export points remain intact; this does not import DXF curves |
+| `cacheRejects` | true | Boolean; remembers failed raster origins while occupancy grows. False reduces cache memory at the cost of repeated checks |
+| `spacing` | 0 mm | Outer-boundary gap between parts |
+| `partToSheet` | 0 mm | Margin to the stock outline |
+| `partToHole` | 0 mm | Margin involving hole edges |
+| `gpu` | false | Boolean or OpenCL object described below |
+
+### First layout
+
+Mode first runs one complete greedy compact strategy across available sheets
+and exports its result. It does not wait for optimization restarts. This is not
+a guarantee that every part fits: inspect unplacedCount. Trials does not change
+the single-strategy behavior. Rotations, clearances and refinement still apply.
+
+### Timed optimization
+
+```json
+"CLI-nesting": {
+  "mode":"timed", "timeLimitSeconds":600,
+  "continuousRoundSeconds":30, "trials":4, "gpu":true
+}
+```
+
+600 seconds is ten minutes. Search continues for the whole budget, restarting
+with varied part order and angle priorities. The best validated layout is kept
+across strategies/restarts and exported at the deadline or on user stop. Worse
+or incomplete attempts do not replace it. A tiny budget can leave all parts unplaced.
+
+The deadline is cooperative and shared across sheets/restarts. In-flight GPU
+or geometry operations finish safely; input/output, cleanup and preview opening
+can add time beyond the configured search budget.
+
+### Continuous optimization
+
+Mode continuous creates or **empties the entire results directory beside the
+input JSON** at startup, then searches until stopped. Back up old results before
+starting another session. Do not keep the input inside that results directory.
+
+The first validated candidate establishes a baseline, possibly partial. Strict
+improvements are saved as results/result1.json, result2.json, etc., with matching
+.dxf/.svg when enabled. Equal/worse candidates produce no new files. Search
+continues after all parts fit and after rounds with no improvement. There is no
+overall deadline. Output basenames are ignored here; the fixed resultN names apply.
+
+Files are written completely under temporary names, then companions are
+published before the final JSON. That JSON marks a completed result group.
+After forced termination, ignore temporary or companion-only groups. A lock
+prevents concurrent sessions from clearing each other's files; use separate input
+directories. Symlinks/junctions inside results are rejected before cleanup.
+
+Ctrl+C/Ctrl+Break requests a graceful stop. Console close also requests stopping,
+but Windows allows only a limited shutdown interval. Previously published files
+remain; force-killing or power loss cannot guarantee the in-flight candidate.
+First/timed modes do not automatically clear the results directory.
+
+### Quality objective
+
+Timed/continuous search prefers, in order: fewer unplaced copies, less unused
+material in used sheets (usedSheetWasteArea), then less unused area inside occupied
+bounding rectangles (compactWasteArea). For identical parts on identical stock,
+physical scrap area is constant; rearrangement can still improve compactness and
+remnant shape. Clearances remain unused material in the statistics. Search is
+heuristic: global optimality and further improvements are not guaranteed.
+
+## OpenCL GPU options
+
+```json
+"gpu": {"enabled":true, "device":-1, "fallbackToCpu":true, "batchSize":65536}
+```
+
+| Field | Default inside object | Purpose |
+|---|---|---|
+| `enabled` | true | Boolean; initialize OpenCL. False disables it while retaining settings |
+| `device` | -1 | Integer -1..1024; -1 chooses automatically, preferring a discrete GPU. Other values must match an available --list-gpus index |
+| `fallbackToCpu` | true | Boolean; continue on CPU and report the reason if GPU startup/execution fails. False turns these failures into errors |
+| `batchSize` | 65536 | Integer 256..262144; maximum candidates per GPU batch. Larger batches may reduce launch overhead but increase buffers and latency |
+
+gpu true and an empty object use these defaults; gpu false does not load OpenCL.
+`clinesting.exe --list-gpus` prints device indices, names, vendors and memory.
+Indices need not match Task Manager numbering. Install a graphics driver with OpenCL.
+
+GPU handles bitmap collision batches. CPU builds geometry/proposals, validates
+exact contours and clearances, scores and commits placements. Small jobs can be
+solved by proposals without any GPU kernel. Full CPU/GPU utilization is not
+guaranteed or an optimization objective; startup overhead can make GPU slower.
+More than 64 orientations enable extra CPU proposal helpers within the worker budget.
+
+## Output configuration
+
+Output is a root object alongside parts/sheets, not inside settings.
+
+| Field | Default | Purpose |
+|---|---|---|
+| `resultJson` | result.json | Nonempty string path; mandatory JSON output, FreeCAD spelling |
+| `json` | Alias of resultJson | Original spelling; both must agree when supplied together |
+| `dxf` | false | false disables CAD output; true uses result.dxf; nonempty string chooses a path |
+| `svg` | false | false disables preview export; true uses result.svg; nonempty string chooses a path |
+| `openPreview` | false | Boolean; open SVG in the Windows-associated viewer. Requires svg; continuous opens only the first result |
+
+Paths may be absolute or relative to the input directory. Boolean true uses the
+default filename independently of the JSON filename. First/timed creates missing
+parent directories and overwrites existing outputs. Input and all output formats
+must use distinct files, including hard links/path aliases. JSON cannot be disabled.
+Continuous uses only the enabled formats, with fixed results/resultN filenames.
+
+SVG shows stock, colored parts, holes and tooltips. JSON/DXF retain full point
+geometry. Failure to open a viewer does not delete the output. DXF is an actual
+CAD exchange file, not JSON with a changed extension.
+
+### Result JSON fields
+
+| Field | Meaning |
+|---|---|
+| `schemaVersion`, `schema_version`, `units` | Output schema 1 and millimetres |
+| `job_id`, `created_at`, `_ip_nesting` | Input metadata when present |
+| `placed`, `unplacedCount`, `unplaced` | Counts and remaining copy IDs/sources; partial results are valid |
+| `sheets[].id`, `source`, `points`, `holes` | Used stock identity and geometry |
+| `sheets[].parts[]` | Copies with numeric id, source, translation x/y and rotation in degrees |
+| Part `points`, `holes` | Already transformed absolute coordinates; do not transform again |
+| Object `_ip_nesting` | Original metadata, also on unplaced copies. Original 3D placement is not the nesting result transform |
+| `clearances` | Effective spacing, partToSheet and partToHole |
+| `mode`, `continuous`, `timeLimitSeconds`, `continuousRoundSeconds` | Effective search controls |
+| `timeLimitReached`, `stopReason` | completed, time_limit or user_stop. Continuous snapshot status describes its candidate, not session completion |
+| `timingMs`, `searchIteration` | Search/orchestration duration excluding file writing; zero-based restart of the saved candidate |
+| `rotations`, `rotationStep` | Global grid; part restrictions may differ |
+| `trials`, `startedTrials`, `selectedTrial` | Strategy counts and winner diagnostics |
+| `workersUsed`, `proposalWorkersPerTrial` | Strategy workers and proposal helpers |
+| `patternPlacements`, `rejectedPositionSkips` | Pattern and failed-position cache diagnostics |
+| `strategyResults` | Per-strategy counts, duration, completion and phase timings |
+| `gpu.requested`, `used`, `device`, `backend` | Request, actual kernel use, device and OpenCL backend |
+| `gpu.batches`, `candidates`, `fallbackReason` | GPU diagnostics. Timed totals cover restarts; continuous snapshots describe the candidate strategy |
+| `usedSheetWasteArea` | Unused material in used sheets, mm squared, excluding holes and unused sheets |
+| `occupiedBoundsArea`, `compactWasteArea` | Occupied raster bounding-rectangle area and unused area within it |
+| `utilisation` | Legacy percentage against processed stock material; not the sole quality criterion |
+
+## Command-line reference
+
+| Argument | Purpose |
+|---|---|
+| `--input path` | Input JSON, default input.json in the working directory |
+| `--output path` | Override JSON path; .dxf writes real DXF and a companion .json |
+| `--dxf path` | Enable/override DXF output |
+| `--threads N` | Override CPU budget, integer 1..256 |
+| `--trials N` | Override strategy count, integer 1..4; first still uses one |
+| `--rotations N` | Override global orientation count, integer 1..3600 |
+| `--list-gpus` | Print devices and exit, without reading input |
+| `--help`, `-h` | Print brief usage and exit |
+
+CLI paths resolve against the working directory. JSON is validated before CLI
+overrides, so arguments cannot repair contradictory JSON. Mode, GPU, deadlines,
+clearances and SVG options belong in JSON. Without mode, continuous true selects
+continuous; otherwise positive timeLimitSeconds selects timed; otherwise first.
+
+Exit code 0 means completion or graceful stop, even with unplaced parts. Code 1
+means input, calculation or file failure. Forced OS termination may use another code.
+
+## Performance and limitations
+
+- Restrict angles when possible. A 0.1-degree grid substantially increases work
+  and does not improve translation resolution.
+- Finer rasters use more memory. Raster allocation is capped; pixel caches use
+  about 64 MiB per strategy/sheet and rejected origins up to 32 MiB. Geometry and
+  other state need additional memory. GPU masks are limited to 512 MiB and the
+  device allocation limit.
+- Large gaps or small stock may prevent every placement. Check unplacedCount;
+  exit code 0 is not proof that all copies fit.
+- For GPU problems, inspect --list-gpus and fallbackReason or allow fallbackToCpu.
+- If the window immediately closes, run from a terminal or use run.cmd.
+- Increase continuousRoundSeconds if restarts spend their whole budget preparing.
+- Check spelling and object location when an option is rejected.
+- There is no toolpath generation, automatic kerf compensation or 3D transformation.
+
+## Source layout
+
+`demo/json_main.cpp` handles CLI modes and exports; `src/json_io.cpp` handles
+input/output; `src/bitmap_nesting.cpp` implements raster search and scheduling;
+`src/geometry.cpp` implements polygon and clearance checks;
+`src/continuous_nesting.cpp` manages restarts; `src/gpu_bitmap.cpp` handles OpenCL;
+`demo/continuous_results.hpp` publishes numbered files safely;
+`demo/svg_preview.hpp` writes previews; `include/clinesting` contains public interfaces.
+
+## Third-party code and licenses
+
+| Dependency | Version and purpose | License |
+|---|---|---|
+| [Clipper2](https://github.com/AngusJohnson/Clipper2) | 1.5.4, polygon Boolean operations; CMake FetchContent | [Boost Software License 1.0](https://github.com/AngusJohnson/Clipper2/blob/Clipper2_1.5.4/LICENSE) |
+| [nlohmann/json](https://github.com/nlohmann/json) | 3.11.3, vendored JSON parser/writer | [MIT upstream](https://github.com/nlohmann/json/blob/v3.11.3/LICENSE.MIT), [included license](third_party/nlohmann/LICENSE.MIT) |
+| [Khronos OpenCL-Headers](https://github.com/KhronosGroup/OpenCL-Headers) | v2024.10.24, vendored OpenCL declarations | [Apache-2.0 upstream](https://github.com/KhronosGroup/OpenCL-Headers/blob/v2024.10.24/LICENSE), [included license](third_party/opencl/LICENSE) |
+
+The OpenCL runtime is supplied by the GPU vendor's driver, not bundled. Retain
+third-party notices when distributing source/packages. Upstream headers retain
+their original comments and license notices.

@@ -1,10 +1,11 @@
 @echo off
 setlocal
 cd /d "%~dp0"
-set "nestingExe=%~dp0deepnestcpp.exe"
-if not exist "%nestingExe%" set "nestingExe=%~dp0build-release\Release\deepnestcpp.exe"
+set "nestingExe=%~dp0clinesting.exe"
+if not exist "%nestingExe%" set "nestingExe=%~dp0build-release\Release\clinesting.exe"
 if not exist "%nestingExe%" (
-  echo Build the application first with build-release.ps1.
+  echo Build first: cmake --preset windows-release
+  echo Then run: cmake --build --preset windows-release --parallel
   pause
   exit /b 1
 )

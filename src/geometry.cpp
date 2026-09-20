@@ -1,4 +1,4 @@
-#include "deepnestcpp/geometry.hpp"
+#include "clinesting/geometry.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -7,7 +7,7 @@
 #include <numbers>
 #include <sstream>
 
-namespace deepnest {
+namespace clinesting {
 
 using namespace Clipper2Lib;
 
@@ -314,6 +314,77 @@ bool hasMaterialOutsideSheet(const Polygon& part, const Polygon& sheet, const Co
   return false;
 }
 
+// Compute the squared distance from a point to a finite edge.
+double pointEdgeDistanceSquared(const Point& p,const Point& a,const Point& b) {
+  const double dx=b.x-a.x, dy=b.y-a.y;
+  const double length=dx*dx+dy*dy;
+  const double t=length>0 ? std::clamp(((p.x-a.x)*dx+(p.y-a.y)*dy)/length,0.0,1.0) : 0;
+  const double x=p.x-a.x-t*dx, y=p.y-a.y-t*dy;
+  return x*x+y*y;
+}
+
+// Test two segments for a proper or endpoint intersection.
+bool segmentsIntersect(const Point& p,const Point& q,const Point& r,const Point& s) {
+  const auto cross=[](const Point& a,const Point& b,const Point& c) {
+    return (b.x-a.x)*(c.y-a.y)-(b.y-a.y)*(c.x-a.x);
+  };
+  const auto onSegment=[](const Point& a,const Point& b,const Point& p) {
+    return p.x>=std::min(a.x,b.x)-1e-12 && p.x<=std::max(a.x,b.x)+1e-12 &&
+           p.y>=std::min(a.y,b.y)-1e-12 && p.y<=std::max(a.y,b.y)+1e-12;
+  };
+  const double c1=cross(p,q,r), c2=cross(p,q,s), c3=cross(r,s,p), c4=cross(r,s,q);
+  const auto opposite=[](double a,double b) { return (a>1e-12&&b<-1e-12)||(a<-1e-12&&b>1e-12); };
+  if(opposite(c1,c2)&&opposite(c3,c4)) return true;
+  return (std::abs(c1)<=1e-12&&onSegment(p,q,r))||(std::abs(c2)<=1e-12&&onSegment(p,q,s))||
+         (std::abs(c3)<=1e-12&&onSegment(r,s,p))||(std::abs(c4)<=1e-12&&onSegment(r,s,q));
+}
+
+// Compute the exact minimum distance between two finite 2D segments.
+double segmentDistanceSquared(const Point& p,const Point& q,const Point& r,const Point& s) {
+  if(segmentsIntersect(p,q,r,s)) return 0.0;
+  return std::min({pointEdgeDistanceSquared(p,r,s),pointEdgeDistanceSquared(q,r,s),
+                   pointEdgeDistanceSquared(r,p,q),pointEdgeDistanceSquared(s,p,q)});
+}
+
+// Reject contour pairs whose Euclidean edge separation is below the margin.
+bool contoursTooClose(const Polygon& a,const Polygon& b,double margin) {
+  if(margin<=0) return false;
+  const double squared=std::max(0.0,margin-std::min(1e-7,margin*1e-9));
+  const double threshold=squared*squared;
+  for(size_t i=0;i<a.points.size();++i) {
+    const auto& p=a.points[i]; const auto& q=a.points[(i+1)%a.points.size()];
+    for(size_t j=0;j<b.points.size();++j) {
+      const auto& r=b.points[j]; const auto& s=b.points[(j+1)%b.points.size()];
+      const double gapX=std::max({std::min(p.x,q.x)-std::max(r.x,s.x),std::min(r.x,s.x)-std::max(p.x,q.x),0.0});
+      const double gapY=std::max({std::min(p.y,q.y)-std::max(r.y,s.y),std::min(r.y,s.y)-std::max(p.y,q.y),0.0});
+      if(gapX*gapX+gapY*gapY>=threshold) continue;
+      if(segmentDistanceSquared(p,q,r,s)<threshold) return true;
+    }
+  }
+  return false;
+}
+
+// Check overlap and independent outer-edge/hole-edge distances between parts.
+bool violatesPartClearance(const Polygon& a,const Polygon& b,const Config& config) {
+  if(hasMaterialOverlap(a,b,config)||contoursTooClose(a,b,config.spacing)) return true;
+  for(const auto& hole:a.children) {
+    if(contoursTooClose(hole,b,config.holeSpacing)) return true;
+    for(const auto& other:b.children) if(contoursTooClose(hole,other,config.holeSpacing)) return true;
+  }
+  for(const auto& hole:b.children) if(contoursTooClose(a,hole,config.holeSpacing)) return true;
+  return false;
+}
+
+// Check stock containment and independent margins to the stock outline and holes.
+bool violatesSheetClearance(const Polygon& part,const Polygon& sheet,const Config& config) {
+  if(hasMaterialOutsideSheet(part,sheet,config)||contoursTooClose(part,sheet,config.sheetSpacing)) return true;
+  for(const auto& hole:sheet.children) {
+    if(contoursTooClose(part,hole,config.holeSpacing)) return true;
+    for(const auto& inner:part.children) if(contoursTooClose(inner,hole,config.holeSpacing)) return true;
+  }
+  return false;
+}
+
 MergedLengthResult mergedLength(const std::vector<Polygon>& parts, const Polygon& p, double minlength, double tolerance) {
   MergedLengthResult result;
   const double minLen2 = minlength * minlength;
@@ -416,4 +487,4 @@ MergedLengthResult mergedLength(const std::vector<Polygon>& parts, const Polygon
   return result;
 }
 
-}  // namespace deepnest
+}  // namespace clinesting

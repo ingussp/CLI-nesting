@@ -1,6 +1,6 @@
 #pragma once
-#include "deepnestcpp/json_io.hpp"
-#include "deepnestcpp/dxf_export.hpp"
+#include "clinesting/json_io.hpp"
+#include "clinesting/dxf_export.hpp"
 #include "svg_preview.hpp"
 #include <filesystem>
 #include <cwctype>
@@ -16,7 +16,7 @@
 #include <unistd.h>
 #endif
 
-namespace deepnest::cli {
+namespace clinesting::cli {
 namespace fs=std::filesystem;
 // MSVC weakly_canonical can attempt to open a missing leaf and report access
 // denied in restricted Windows environments. Canonicalize existing ancestors
@@ -28,6 +28,7 @@ inline fs::path resolvePath(const fs::path& path) {
   if(parent==absolute || parent.empty()) throw std::runtime_error("Cannot resolve output path");
   return (resolvePath(parent)/absolute.filename()).lexically_normal();
 }
+// Detect filesystem links that must not be followed during result cleanup.
 inline bool isLink(const fs::path& path) {
 #ifdef _WIN32
   const auto attributes=GetFileAttributesW(path.c_str());
@@ -35,6 +36,7 @@ inline bool isLink(const fs::path& path) {
 #endif
   return fs::is_symlink(fs::symlink_status(path));
 }
+// Check whether one canonical path lies within another directory.
 inline bool within(const fs::path& child,const fs::path& parent) {
   auto c=child.begin();
   for(auto p=parent.begin();p!=parent.end();++p,++c) {
@@ -53,6 +55,7 @@ inline bool within(const fs::path& child,const fs::path& parent) {
 // Held outside results so a second running process cannot clear the first's history.
 class DirectoryLock {
  public:
+  // Initialize exclusive access to the result directory.
   explicit DirectoryLock(const fs::path& path) {
     if(isLink(path)) throw std::runtime_error("Results lock must not be a filesystem link");
 #ifdef _WIN32
@@ -65,6 +68,7 @@ class DirectoryLock {
     if(flock(handle_,LOCK_EX|LOCK_NB)!=0) { ::close(handle_); handle_=-1; throw std::runtime_error("Results directory is already in use"); }
 #endif
   }
+  // Release the result directory lock and its OS resources.
   ~DirectoryLock() {
 #ifdef _WIN32
     if(handle_!=INVALID_HANDLE_VALUE) CloseHandle(handle_);
@@ -72,7 +76,9 @@ class DirectoryLock {
     if(handle_>=0) { flock(handle_,LOCK_UN); ::close(handle_); }
 #endif
   }
+  // Initialize exclusive access to the result directory.
   DirectoryLock(const DirectoryLock&)=delete;
+  // Define assignment behavior for this resource-owning object.
   DirectoryLock& operator=(const DirectoryLock&)=delete;
  private:
 #ifdef _WIN32
@@ -82,10 +88,12 @@ class DirectoryLock {
 #endif
 };
 
+// Manage cleanup and atomic publication of numbered result groups.
 class ResultDirectory {
  public:
+  // Initialize and prepare numbered result output.
   ResultDirectory(const fs::path& workingDirectory,const fs::path& input)
-      :base_(fs::canonical(workingDirectory)),folder_(base_/"results"),lock_(base_/".deepnestcpp-results.lock") {
+      :base_(fs::canonical(workingDirectory)),folder_(base_/"results"),lock_(base_/".clinesting-results.lock") {
     // Preflight the complete tree before deleting anything. Refuse junctions,
     // symlinks and inputs inside the target, including Windows case aliases.
     if(within(fs::weakly_canonical(input),folder_))
@@ -105,7 +113,9 @@ class ResultDirectory {
     }
     fs::create_directory(folder_);
   }
+  // Return the resolved directory used for numbered results.
   const fs::path& path() const { return folder_; }
+  // Write companion files first and publish JSON as the completion marker.
   void save(size_t sequence,const BackgroundRequest& request,const OrchestratorRunStats& result,bool withDxf,bool withSvg=false) {
     const auto stem=folder_/("result"+std::to_string(sequence));
     const fs::path json=stem.string()+".json",dxf=stem.string()+".dxf";

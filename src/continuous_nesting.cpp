@@ -1,12 +1,13 @@
-#include "deepnestcpp/continuous_nesting.hpp"
-#include "deepnestcpp/geometry.hpp"
+#include "clinesting/continuous_nesting.hpp"
+#include "clinesting/geometry.hpp"
 #include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <optional>
 #include <stdexcept>
 
-namespace deepnest {
+namespace clinesting {
+// Compute unplaced count and unused stock/bounding areas.
 LayoutQuality layoutQuality(const std::vector<Polygon>& sheets,const PlacementResult& result,
                             const BitmapNestingStats& stats) {
   double usedArea=0;
@@ -18,6 +19,7 @@ LayoutQuality layoutQuality(const std::vector<Polygon>& sheets,const PlacementRe
   return {result.unplaced.size(),std::max(0.0,usedArea-result.area),
           std::max(0.0,stats.occupiedBoundsArea-result.area)};
 }
+// Compare layouts by completeness, stock waste and compactness.
 bool improvesLayout(const LayoutQuality& candidate,const LayoutQuality& incumbent) {
   if(candidate.unplaced!=incumbent.unplaced) return candidate.unplaced<incumbent.unplaced;
   const auto compare=[](double a,double b) {
@@ -28,6 +30,7 @@ bool improvesLayout(const LayoutQuality& candidate,const LayoutQuality& incumben
   return waste<0 || (waste==0 && compare(candidate.compactWasteArea,incumbent.compactWasteArea)<0);
 }
 
+// Coordinate randomized restarts and retain the best validated candidate.
 static OrchestratorRunStats optimize(BackgroundRequest request,const std::function<bool()>& stop,
                                      const ImprovementCallback& onImprovement,bool timed) {
   if(request.config.algorithm!=NestingAlgorithm::Bitmap || !stop || !onImprovement)
@@ -67,10 +70,14 @@ static OrchestratorRunStats optimize(BackgroundRequest request,const std::functi
     incumbent=quality;
     ++sequence;
   };
+  // Adapt nesting events to the current command-line workflow.
   class Sink final:public EventSink {
    public:
+    // Receive the start-of-job notification and input counts.
     void onTestStart(const std::vector<Polygon>&,const std::vector<Polygon>&,const Config&,int) override {}
+    // Receive the current nesting progress notification.
     void onProgress(int,double) override {}
+    // Receive the completed placement result.
     void onResult(const PlacementResult&) override {}
   } sink;
   BackgroundOrchestrator orchestrator;
@@ -96,10 +103,12 @@ static OrchestratorRunStats optimize(BackgroundRequest request,const std::functi
   best.timings.totalMs=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-started).count();
   return best;
 }
+// Restart optimization until stopped and publish strict improvements.
 void runContinuousNesting(BackgroundRequest request,const std::function<bool()>& stop,
                           const ImprovementCallback& onImprovement) {
   static_cast<void>(optimize(std::move(request),stop,onImprovement,false));
 }
+// Optimize until the shared deadline and return the best candidate.
 OrchestratorRunStats runTimedNesting(BackgroundRequest request,const std::function<bool()>& stop) {
   return optimize(std::move(request),stop,[](const auto&,const auto&,size_t) {},true);
 }

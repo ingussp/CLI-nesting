@@ -1,8 +1,8 @@
 cmake_minimum_required(VERSION 3.20)
-project(deepnestcpp LANGUAGES CXX)
+project(clinesting LANGUAGES CXX)
 
-option(DEEPNEST_STATIC_RUNTIME "Use the static MSVC runtime for a standalone executable" ON)
-if(MSVC AND DEEPNEST_STATIC_RUNTIME)
+option(CLINESTING_STATIC_RUNTIME "Use the static MSVC runtime for a standalone executable" ON)
+if(MSVC AND CLINESTING_STATIC_RUNTIME)
   set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 endif()
 
@@ -25,7 +25,7 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(clipper2)
 
-add_library(deepnestcpp
+add_library(clinesting
   src/bitmap_nesting.cpp
   src/continuous_nesting.cpp
   src/gpu_bitmap.cpp
@@ -40,18 +40,18 @@ add_library(deepnestcpp
   src/json_io.cpp
 )
 
-target_include_directories(deepnestcpp
+target_include_directories(clinesting
   PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/third_party ${CMAKE_CURRENT_SOURCE_DIR}/third_party/opencl
   PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
 )
 
-target_link_libraries(deepnestcpp PUBLIC Clipper2 Threads::Threads ${CMAKE_DL_LIBS})
+target_link_libraries(clinesting PUBLIC Clipper2 Threads::Threads ${CMAKE_DL_LIBS})
 
-add_executable(deepnestcpp_demo demo/main.cpp)
-target_link_libraries(deepnestcpp_demo PRIVATE deepnestcpp)
+add_executable(clinesting_demo demo/main.cpp)
+target_link_libraries(clinesting_demo PRIVATE clinesting)
 
-add_executable(deepnestcpp_cli demo/json_main.cpp)
-set_target_properties(deepnestcpp_cli PROPERTIES OUTPUT_NAME deepnestcpp)
-target_link_libraries(deepnestcpp_cli PRIVATE deepnestcpp)
+add_executable(clinesting_cli demo/json_main.cpp)
+set_target_properties(clinesting_cli PROPERTIES OUTPUT_NAME clinesting)
+target_link_libraries(clinesting_cli PRIVATE clinesting)
 

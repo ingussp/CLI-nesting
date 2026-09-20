@@ -1,7 +1,7 @@
-#include "deepnestcpp/demo_cli.hpp"
-#include "deepnestcpp/demo_setup.hpp"
-#include "deepnestcpp/dxf_export.hpp"
-#include "deepnestcpp/orchestrator.hpp"
+#include "clinesting/demo_cli.hpp"
+#include "clinesting/demo_setup.hpp"
+#include "clinesting/dxf_export.hpp"
+#include "clinesting/orchestrator.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -13,18 +13,21 @@
 #include <string>
 #include <vector>
 
-using namespace deepnest;
+using namespace clinesting;
 
 namespace {
 
+// Return the printable name of the chosen nesting algorithm.
 const char* algorithmName(NestingAlgorithm algorithm) {
   return algorithm == NestingAlgorithm::Bitmap ? "bitmap" : "nfp";
 }
 
+// Print phase timings for the completed run.
 void printTimingLine(const char* label, double ms) {
   std::cout << std::fixed << std::setprecision(3) << label << ": " << ms << " ms (" << (ms / 1000.0) << " s)\n";
 }
 
+// Count physical part instances across all used sheets.
 size_t countPlacedParts(const PlacementResult& result) {
   size_t placed = 0;
   for (const auto& sheet : result.placements) {
@@ -33,10 +36,13 @@ size_t countPlacedParts(const PlacementResult& result) {
   return placed;
 }
 
+// Print demo progress, placement details and diagnostics.
 class StdoutSink : public EventSink {
  public:
+  // Record the worker count for progress reporting.
   void setWorkerCount(int workerCount) { workerCount_ = workerCount; }
 
+  // Receive the start-of-job notification and input counts.
   void onTestStart(const std::vector<Polygon>& sheets,
                   const std::vector<Polygon>& parts,
                   const Config&,
@@ -45,6 +51,7 @@ class StdoutSink : public EventSink {
     std::cout << "workers=" << workerCount_ << "\n";
   }
 
+  // Receive the current nesting progress notification.
   void onProgress(int index, double progress) override {
     if (progress < 0.0) {
       if (lastPercent_ != 100) {
@@ -62,11 +69,13 @@ class StdoutSink : public EventSink {
     std::cout << "progress index=" << index << " value=" << progress << "\n";
   }
 
+  // Receive the completed placement result.
   void onResult(const PlacementResult& result) override {
     std::cout << "result fitness=" << result.fitness << " placements=" << result.placements.size()
               << " utilisation=" << result.utilisation << "%\n";
   }
 
+  // Receive bitmap diagnostics after processing a part.
   void onBitmapPartProgress(const BitmapNestingStats::PartStats& partStats, size_t totalParts) override {
     if (!debugPlacementEnabled_) {
       return;
@@ -84,6 +93,7 @@ class StdoutSink : public EventSink {
     std::cout << line.str() << "\n" << std::flush;
   }
 
+  // Enable or disable detailed demo placement output.
   void setDebugPlacementEnabled(bool enabled) { debugPlacementEnabled_ = enabled; }
 
  private:
@@ -94,6 +104,7 @@ class StdoutSink : public EventSink {
 
 }  // namespace
 
+// Parse command-line arguments and run the selected nesting workflow.
 int main(int argc, char** argv) {
   const auto appStart = std::chrono::steady_clock::now();
   std::vector<std::string_view> args;
@@ -112,7 +123,7 @@ int main(int argc, char** argv) {
   }
 
   if (options.showHelp) {
-    std::cout << "Usage: deepnestcpp_demo [--count <N>] [--threads <N>] [--algorithm nfp|bitmap]\n"
+    std::cout << "Usage: clinesting_demo [--count <N>] [--threads <N>] [--algorithm nfp|bitmap]\n"
                  "                        [--bitmap-resolution <mm-per-pixel>] [--bitmap-step <px>]\n"
                  "                        [--debug-placement] [--output <path>] [--help]\n"
               << "  --count <N>     Number of identical star parts to generate (default "

@@ -1,5 +1,5 @@
 #pragma once
-#include "deepnestcpp/geometry.hpp"
+#include "clinesting/geometry.hpp"
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
@@ -7,7 +7,8 @@
 #include <algorithm>
 #include <unordered_map>
 
-namespace deepnest::cli {
+namespace clinesting::cli {
+// Escape text before inserting it into SVG markup.
 inline std::string xmlText(const std::string& text) {
   std::string out;
   for(unsigned char c:text) {
@@ -17,6 +18,7 @@ inline std::string xmlText(const std::string& text) {
   }
   return out;
 }
+// Render original transformed part contours and sheets as an SVG preview.
 inline void exportSvg(const std::filesystem::path& path,const std::vector<Polygon>& sheets,
                       const std::vector<Polygon>& parts,const PlacementResult& result) {
   std::ofstream out(path,std::ios::binary);

@@ -1,34 +1,10 @@
 {
   "units": "mm",
-  "config": {
-    "algorithm": "bitmap",
-    "mode": "first",
-    "continuous": false,
-    "timeLimitSeconds": 0,
-    "continuousRoundSeconds": 30,
-    "rotations": 4,
-    "rotationStep": 90,
-    "threads": 8,
-    "trials": 4,
-    "bitmapResolutionMm": 1,
-    "resolution": 1,
-    "bitmapSearchStepPx": 1,
-    "step": 1,
-    "curveTolerance": 0.3,
-    "cacheRejects": true,
-    "spacing": 0,
-    "gpu": {
-      "enabled": true,
-      "device": -1,
-      "fallbackToCpu": true,
-      "batchSize": 65536
-    }
-  },
   "output": {
-    "json": "result.json",
     "dxf": "result.dxf",
     "svg": "result.svg",
-    "openPreview": true
+    "openPreview": true,
+    "resultJson": "result.json"
   },
   "sheets": [
     {
@@ -45,8 +21,46 @@
     {
       "id": "polygon-stock",
       "quantity": 1,
-      "points": [[0, 0], [300, 0], [300, 200], [0, 200]],
-      "holes": [{"points": [[140, 90], [160, 90], [160, 110], [140, 110]]}]
+      "holes": [
+        {
+          "points": [
+            [
+              140,
+              90
+            ],
+            [
+              160,
+              90
+            ],
+            [
+              160,
+              110
+            ],
+            [
+              140,
+              110
+            ]
+          ]
+        }
+      ],
+      "outer": [
+        [
+          0,
+          0
+        ],
+        [
+          300,
+          0
+        ],
+        [
+          300,
+          200
+        ],
+        [
+          0,
+          200
+        ]
+      ]
     }
   ],
   "parts": [
@@ -57,30 +71,161 @@
       "quantity": 6,
       "count": 6,
       "angle": 45,
-      "points": [[0, 0], [30, 0], [30, 10], [0, 10]],
+      "points": [
+        [
+          0,
+          0
+        ],
+        [
+          30,
+          0
+        ],
+        [
+          30,
+          10
+        ],
+        [
+          0,
+          10
+        ]
+      ],
       "holes": []
     },
     {
       "id": "allowed-angles",
       "quantity": 6,
-      "allowedAngles": [0, 90, 180],
+      "allowedAngles": [
+        0,
+        90,
+        180
+      ],
       "points": [
-        {"x": 0, "y": 0}, {"x": 30, "y": 0}, {"x": 30, "y": 10},
-        {"x": 10, "y": 10}, {"x": 10, "y": 30}, {"x": 0, "y": 30}
+        {
+          "x": 0,
+          "y": 0
+        },
+        {
+          "x": 30,
+          "y": 0
+        },
+        {
+          "x": 30,
+          "y": 10
+        },
+        {
+          "x": 10,
+          "y": 10
+        },
+        {
+          "x": 10,
+          "y": 30
+        },
+        {
+          "x": 0,
+          "y": 30
+        }
       ]
     },
     {
       "id": "global-grid-with-offset",
       "quantity": 6,
       "rotation": 15,
-      "points": [[0, 0, 0], [30, 0, 0], [25, 20, 0], [0, 20, 0]]
+      "points": [
+        [
+          0,
+          0,
+          0
+        ],
+        [
+          30,
+          0,
+          0
+        ],
+        [
+          25,
+          20,
+          0
+        ],
+        [
+          0,
+          20,
+          0
+        ]
+      ],
+      "rotations": 4
     },
     {
       "id": "part-with-hole",
       "quantity": 6,
       "rotation": 0,
-      "points": [[0, 0], [30, 0], [30, 30], [0, 30]],
-      "holes": [[[10, 10], [20, 10], [20, 20], [10, 20]]]
+      "points": [
+        [
+          0,
+          0
+        ],
+        [
+          30,
+          0
+        ],
+        [
+          30,
+          30
+        ],
+        [
+          0,
+          30
+        ]
+      ],
+      "holes": [
+        [
+          [
+            10,
+            10
+          ],
+          [
+            20,
+            10
+          ],
+          [
+            20,
+            20
+          ],
+          [
+            10,
+            20
+          ]
+        ]
+      ]
     }
-  ]
+  ],
+  "schema_version": 1,
+  "settings": {
+    "units": "mm",
+    "spacing": 5,
+    "partToSheet": 5,
+    "partToHole": 2
+  },
+  "CLI-nesting": {
+    "algorithm": "bitmap",
+    "mode": "first",
+    "continuous": false,
+    "timeLimitSeconds": 0,
+    "continuousRoundSeconds": 30,
+    "rotations": 4,
+    "rotationStep": 90,
+    "threads": 8,
+    "trials": 4,
+    "bitmapResolutionMm": 1,
+    "resolution": 1,
+    "bitmapSearchStepPx": 1,
+    "step": 1,
+    "curveTolerance": 0.3,
+    "cacheRejects": true,
+    "gpu": {
+      "enabled": true,
+      "device": -1,
+      "fallbackToCpu": true,
+      "batchSize": 65536
+    }
+  }
 }

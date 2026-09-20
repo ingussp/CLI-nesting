@@ -1,6 +1,6 @@
-#include "deepnestcpp/json_io.hpp"
-#include "deepnestcpp/continuous_nesting.hpp"
-#include "deepnestcpp/geometry.hpp"
+#include "clinesting/json_io.hpp"
+#include "clinesting/continuous_nesting.hpp"
+#include "clinesting/geometry.hpp"
 #include <nlohmann/json.hpp>
 #include <fstream>
 #include <cmath>
@@ -10,20 +10,23 @@
 #include <sstream>
 #include <iomanip>
 
-namespace deepnest {
+namespace clinesting {
 namespace {
 using Json=nlohmann::json;
+// Read a finite JSON number within the supported coordinate magnitude.
 double number(const Json& v,const std::string& name) {
   if(!v.is_number()) throw std::invalid_argument(name+" must be a number");
   const double n=v.get<double>();
   if(!std::isfinite(n) || std::abs(n)>1000000) throw std::invalid_argument(name+" must be finite and within +/-1000000");
   return n;
 }
+// Read a JSON integer within the requested bounds.
 int integer(const Json& v,const std::string& name,int low,int high) {
   const double n=number(v,name);
   if(std::floor(n)!=n || n<low || n>high) throw std::invalid_argument(name+" is outside the supported integer range");
   return int(n);
 }
+// Choose an explicit ID, fallback name or generated identifier.
 std::string identifier(const Json& obj,const std::string& fallback) {
   if(!obj.contains("id")) return obj.value("name",fallback);
   const auto& id=obj["id"];
@@ -31,8 +34,9 @@ std::string identifier(const Json& obj,const std::string& fallback) {
   if(id.is_number_integer()) return id.dump();
   throw std::invalid_argument("id must be a string or integer");
 }
+// Parse and normalize an ordered nonzero-area point contour.
 Polygon contour(const Json& input,const std::string& name) {
-  const auto& points=input.is_object() ? input.at("points") : input;
+  const auto& points=input.is_object() ? input.at(input.contains("points") ? "points" : "outer") : input;
   if(!points.is_array() || points.size()<3 || points.size()>20000)
     throw std::invalid_argument(name+" requires 3..20000 points");
   Polygon p;
@@ -50,10 +54,13 @@ Polygon contour(const Json& input,const std::string& name) {
   if(p.points.size()<3 || std::abs(polygonArea(p))<1e-9) throw std::invalid_argument(name+" has zero area");
   return p;
 }
+// Parse an outline, holes, metadata and per-part orientation rules.
 Polygon polygon(const Json& obj,const std::string& name,bool sheet) {
   if(!obj.is_object()) throw std::invalid_argument(name+" must be an object");
   Polygon p;
-  if(obj.contains("points")) p=contour(obj,name);
+  if(obj.contains("points") && obj.contains("outer") && obj["points"]!=obj["outer"])
+    throw std::invalid_argument(name+": points and outer disagree");
+  if(obj.contains("points") || obj.contains("outer")) p=contour(obj,name);
   else if(sheet && obj.contains("width") && obj.contains("height")) {
     const double w=number(obj["width"],name+".width"),h=number(obj["height"],name+".height");
     if(w<=0 || h<=0) throw std::invalid_argument("Sheet dimensions must be positive");
@@ -75,6 +82,7 @@ Polygon polygon(const Json& obj,const std::string& name,bool sheet) {
   if(polygonMaterialArea(p)<=0) throw std::invalid_argument(name+" has no material area");
   p.source=identifier(obj,name);
   p.filename=obj.value("filename",std::string{});
+  if(obj.contains("_ip_nesting")) p.metadataJson=obj["_ip_nesting"].dump();
   if(obj.contains("rotation")) p.rotation=number(obj["rotation"],name+".rotation");
   if(obj.contains("angle") || obj.contains("allowedAngles")) {
     if(sheet) throw std::invalid_argument("angle/allowedAngles apply to parts, not sheets");
@@ -93,6 +101,16 @@ Polygon polygon(const Json& obj,const std::string& name,bool sheet) {
     std::sort(p.allowedAngles.begin(),p.allowedAngles.end());
     p.allowedAngles.erase(std::unique(p.allowedAngles.begin(),p.allowedAngles.end()),p.allowedAngles.end());
   }
+  if(obj.contains("rotations")) {
+    if(sheet) throw std::invalid_argument("Per-object rotations apply to parts, not sheets");
+    if(!p.allowedAngles.empty()) throw std::invalid_argument(name+": use rotations or absolute angles, not both");
+    const int count=integer(obj["rotations"],name+".rotations",1,Config::maxRotations);
+    for(int i=0;i<count;++i) {
+      double angle=std::fmod(p.rotation+360.0*i/count,360.0);
+      if(angle<0) angle+=360.0;
+      p.allowedAngles.push_back(angle);
+    }
+  }
   // Calculate identity from the complete geometry. Never trust a user supplied
   // name or id as a geometry cache key.
   std::ostringstream identity;
@@ -107,6 +125,7 @@ Polygon polygon(const Json& obj,const std::string& name,bool sheet) {
   p.geometryKey=identity.str();
   return p;
 }
+// Validate and apply the merged CLI search options.
 void configure(const Json& j,Config& c) {
   if(!j.is_object()) throw std::invalid_argument("config must be an object");
   for(auto it=j.begin();it!=j.end();++it) {
@@ -170,8 +189,12 @@ void configure(const Json& j,Config& c) {
       if(v=="bitmap") c.algorithm=NestingAlgorithm::Bitmap;
       else if(v=="nfp") c.algorithm=NestingAlgorithm::Nfp;
       else throw std::invalid_argument("algorithm must be bitmap or nfp");
-    } else if(k=="spacing") {
-      if(number(v,k)!=0) throw std::invalid_argument("Nonzero spacing is not supported by this JSON schema yet");
+    } else if(k=="spacing" || k=="partToSheet" || k=="partToHole") {
+      const double gap=number(v,k);
+      if(gap<0) throw std::invalid_argument(k+" must be nonnegative");
+      if(k=="spacing") c.spacing=gap;
+      else if(k=="partToSheet") c.sheetSpacing=gap;
+      else c.holeSpacing=gap;
     } else throw std::invalid_argument("Unknown config field: "+k);
   }
   if(!j.contains("mode")) c.mode=c.continuous ? SearchMode::Continuous :
@@ -184,28 +207,64 @@ void configure(const Json& j,Config& c) {
   if(j.contains("mode") && c.mode==SearchMode::First && c.timeLimitSeconds>0)
     throw std::invalid_argument("first mode requires timeLimitSeconds=0; use timed for a time budget");
 }
+// Serialize a contour as arrays of XY coordinates.
 Json pointsJson(const Polygon& p) {
   Json points=Json::array();
   for(const auto& v:p.points) points.push_back({v.x,v.y});
   return points;
 }
+// Serialize all child contours as hole point arrays.
 Json holesJson(const Polygon& p) {
   Json holes=Json::array(); for(const auto& h:p.children) holes.push_back(pointsJson(h)); return holes;
 }
 }
 
+// Merge FreeCAD settings and explicit CLI overrides while discarding only known legacy options.
+Json inputConfig(const Json& root) {
+  Json merged=Json::object();
+  const std::unordered_set<std::string> legacy={"placementType","simplify","useSvgPreProcessor","scale",
+    "endpointTolerance","dxfImportScale","dxfExportScale","exportWithSheetBoundboarders",
+    "exportWithSheetsSpace","exportWithSheetsSpaceValue","mergeLines","timeRatio",
+    "populationSize","mutationRate","useQuantityFromFileName"};
+  for(const char* field:{"settings","config","CLI-nesting"}) {
+    if(!root.contains(field)) continue;
+    const auto& block=root[field];
+    if(!block.is_object()) throw std::invalid_argument(std::string(field)+" must be an object");
+    for(auto it=block.begin();it!=block.end();++it) {
+      if(std::string_view(field)=="settings" && (it.key()=="units" || legacy.contains(it.key()))) continue;
+      const auto key=it.key()=="sheetSpacing" ? "partToSheet" : it.key()=="holeSpacing" ? "partToHole" : it.key();
+      if(key!=it.key() && block.contains(key) && block[key]!=it.value())
+        throw std::invalid_argument(std::string(field)+": conflicting clearance aliases");
+      merged[key]=it.value();
+    }
+  }
+  return merged;
+}
+
+// Parse FreeCAD or CLI JSON and validate the complete job.
 BackgroundRequest parseNestingJson(std::string_view text) {
   try {
     const auto root=Json::parse(text);
     if(!root.is_object()) throw std::invalid_argument("JSON root must be an object");
     if(root.contains("units") && root["units"]!="mm") throw std::invalid_argument("Only millimetres (units: mm) are supported");
+    if(root.contains("schema_version") && integer(root["schema_version"],"schema_version",1,1)!=1)
+      throw std::invalid_argument("Only schema_version 1 is supported");
+    for(const char* field:{"settings","_ip_nesting"}) {
+      if(root.contains(field) && root[field].is_object() && root[field].contains("units") && root[field]["units"]!="mm")
+        throw std::invalid_argument(std::string(field)+".units must be mm");
+    }
     BackgroundRequest request;
+    request.jobId=root.value("job_id",std::string{});
+    request.createdAt=root.value("created_at",std::string{});
+    if(root.contains("_ip_nesting")) request.metadataJson=root["_ip_nesting"].dump();
     request.config.algorithm=NestingAlgorithm::Bitmap;
     request.config.placementType="box";
-    if(root.contains("config")) configure(root["config"],request.config);
+    configure(inputConfig(root),request.config);
     if(root.contains("output")) {
       const auto& output=root["output"];
       if(!output.is_object()) throw std::invalid_argument("output must be an object");
+      if(output.contains("json") && output.contains("resultJson") && output["json"]!=output["resultJson"])
+        throw std::invalid_argument("output.json and output.resultJson disagree");
       for(auto it=output.begin();it!=output.end();++it) {
         const auto& key=it.key(); const auto& value=it.value();
         auto pathValue=[&]() {
@@ -214,7 +273,7 @@ BackgroundRequest parseNestingJson(std::string_view text) {
           if(path.empty() || path.find('\0')!=std::string::npos) throw std::invalid_argument("Invalid output path");
           return path;
         };
-        if(key=="json") request.output.json=pathValue();
+        if(key=="json" || key=="resultJson") request.output.json=pathValue();
         else if(key=="dxf" || key=="svg") {
           auto& path=key=="dxf" ? request.output.dxf : request.output.svg;
           path=value.is_boolean() ? (value.get<bool>() ? "result."+key : "") : pathValue();
@@ -232,6 +291,9 @@ BackgroundRequest parseNestingJson(std::string_view text) {
       throw std::invalid_argument("Continuous search requires algorithm: bitmap");
     if(request.config.gpuEnabled && request.config.algorithm!=NestingAlgorithm::Bitmap)
       throw std::invalid_argument("GPU acceleration requires algorithm: bitmap");
+    if(request.config.algorithm!=NestingAlgorithm::Bitmap &&
+       (request.config.spacing>0 || request.config.sheetSpacing>0 || request.config.holeSpacing>0))
+      throw std::invalid_argument("Clearance settings require algorithm: bitmap");
     const auto& parts=root.at("parts");
     if(!parts.is_array() || parts.empty()) throw std::invalid_argument("parts must be a nonempty array");
     int instanceId=1;
@@ -262,6 +324,7 @@ BackgroundRequest parseNestingJson(std::string_view text) {
   } catch(const Json::exception& e) { throw std::invalid_argument(std::string("Invalid nesting JSON: ")+e.what()); }
 }
 
+// Read a size-limited JSON input file and parse the job.
 BackgroundRequest readNestingJson(const std::filesystem::path& path) {
   if(std::filesystem::file_size(path)>64ULL*1024*1024) throw std::invalid_argument("JSON input exceeds 64 MiB");
   std::ifstream stream(path,std::ios::binary);
@@ -270,6 +333,7 @@ BackgroundRequest readNestingJson(const std::filesystem::path& path) {
   return parseNestingJson(text);
 }
 
+// Export transformed contours, metadata and search diagnostics as JSON.
 void writeNestingJson(const std::filesystem::path& path,const BackgroundRequest& input,const OrchestratorRunStats& run) {
   const auto& r=run.placement;
   Json out={{"schemaVersion",1},{"units","mm"},{"placed",input.individual.placement.size()-r.unplaced.size()},
@@ -280,6 +344,12 @@ void writeNestingJson(const std::filesystem::path& path,const BackgroundRequest&
     {"patternPlacements",run.bitmapStats.patternPlacements},{"rejectedPositionSkips",run.bitmapStats.rejectedPositionSkips},
     {"sheets",Json::array()},{"unplaced",Json::array()}};
   out["selectedTrial"]=run.bitmapStats.selectedTrial;
+  out["clearances"]={{"spacing",input.config.spacing},{"partToSheet",input.config.sheetSpacing},
+                     {"partToHole",input.config.holeSpacing}};
+  out["schema_version"]=1;
+  if(!input.jobId.empty()) out["job_id"]=input.jobId;
+  if(!input.createdAt.empty()) out["created_at"]=input.createdAt;
+  if(!input.metadataJson.empty()) out["_ip_nesting"]=Json::parse(input.metadataJson);
   out["timeLimitSeconds"]=input.config.timeLimitSeconds;
   out["timeLimitReached"]=run.bitmapStats.timeLimitReached;
   out["stopReason"]=run.bitmapStats.cancelled ? "user_stop" : run.bitmapStats.timeLimitReached ? "time_limit" : "completed";
@@ -306,17 +376,24 @@ void writeNestingJson(const std::filesystem::path& path,const BackgroundRequest&
   for(const auto& s:r.placements) {
     const auto sheet=std::find_if(input.sheets.begin(),input.sheets.end(),[&](const auto& p){return p.id==s.sheetid;});
     Json sheetResult={{"id",s.sheetid.value_or(0)},{"source",s.sheet},{"parts",Json::array()}};
-    if(sheet!=input.sheets.end()) { sheetResult["points"]=pointsJson(*sheet); sheetResult["holes"]=holesJson(*sheet); }
+    if(sheet!=input.sheets.end()) {
+      sheetResult["points"]=pointsJson(*sheet); sheetResult["holes"]=holesJson(*sheet);
+      if(!sheet->metadataJson.empty()) sheetResult["_ip_nesting"]=Json::parse(sheet->metadataJson);
+    }
     for(const auto& p:s.sheetplacements) {
       const auto found=parts.find(p.id.value_or(0));
       if(found==parts.end()) throw std::runtime_error("Result references an unknown part instance");
       const auto absolute=shiftPolygon(rotatePolygon(*found->second,p.rotation),{p.x,p.y,true});
       sheetResult["parts"].push_back({{"id",p.id.value_or(0)},{"source",p.source},{"x",p.x},{"y",p.y},
         {"rotation",p.rotation},{"points",pointsJson(absolute)},{"holes",holesJson(absolute)}});
+      if(!found->second->metadataJson.empty()) sheetResult["parts"].back()["_ip_nesting"]=Json::parse(found->second->metadataJson);
     }
     out["sheets"].push_back(std::move(sheetResult));
   }
-  for(const auto& p:r.unplaced) out["unplaced"].push_back({{"id",p.id.value_or(0)},{"source",p.source}});
+  for(const auto& p:r.unplaced) {
+    out["unplaced"].push_back({{"id",p.id.value_or(0)},{"source",p.source}});
+    if(!p.metadataJson.empty()) out["unplaced"].back()["_ip_nesting"]=Json::parse(p.metadataJson);
+  }
   std::ofstream stream(path,std::ios::binary);
   if(!stream) throw std::runtime_error("Cannot create result JSON: "+path.string());
   stream<<out.dump(2)<<'\n';

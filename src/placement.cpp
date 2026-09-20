@@ -1,7 +1,7 @@
-#include "deepnestcpp/placement.hpp"
+#include "clinesting/placement.hpp"
 
-#include "deepnestcpp/geometry.hpp"
-#include "deepnestcpp/nfp.hpp"
+#include "clinesting/geometry.hpp"
+#include "clinesting/nfp.hpp"
 
 #include <algorithm>
 #include <clipper2/clipper.h>
@@ -9,12 +9,13 @@
 #include <limits>
 #include <unordered_map>
 
-namespace deepnest {
+namespace clinesting {
 
 using namespace Clipper2Lib;
 
 namespace {
 
+// Apply each part's initial orientation before reference NFP placement.
 std::vector<Polygon> rotateParts(const std::vector<Polygon>& parts) {
   std::vector<Polygon> out;
   out.reserve(parts.size());
@@ -29,6 +30,7 @@ std::vector<Polygon> rotateParts(const std::vector<Polygon>& parts) {
   return out;
 }
 
+// Build a placement record from a part and its translation.
 Placement toPlacement(const Point& shift, const Polygon& part) {
   Placement p;
   p.x = shift.x;
@@ -40,6 +42,7 @@ Placement toPlacement(const Point& shift, const Polygon& part) {
   return p;
 }
 
+// Compute the smallest rectangle enclosing two bounds.
 Bounds mergeBounds(const Bounds& a, const Bounds& b) {
   const double minx = std::min(a.x, b.x);
   const double miny = std::min(a.y, b.y);
@@ -48,6 +51,7 @@ Bounds mergeBounds(const Bounds& a, const Bounds& b) {
   return Bounds{minx, miny, maxx - minx, maxy - miny};
 }
 
+// Convert a forbidden region while removing its feasible holes.
 Paths64 forbiddenNfpToClipperCoordinates(const Polygon& nfp, const Config& config) {
   Paths64 forbidden{outerPathToClipperCoordinates(nfp, config)};
   auto holes = childPathsToClipperCoordinates(nfp, config);
@@ -59,6 +63,7 @@ Paths64 forbiddenNfpToClipperCoordinates(const Polygon& nfp, const Config& confi
 
 }  // namespace
 
+// Place parts with the reference no-fit-polygon algorithm.
 PlacementResult placeParts(std::vector<Polygon> sheets,
                            std::vector<Polygon> parts,
                            const Config& config,
@@ -67,6 +72,8 @@ PlacementResult placeParts(std::vector<Polygon> sheets,
   if(config.timeLimitSeconds!=0 || std::any_of(parts.begin(),parts.end(),
       [](const Polygon& p) { return !p.allowedAngles.empty(); }))
     throw std::invalid_argument("Per-part angles and time limits require algorithm: bitmap");
+  if(config.spacing>0 || config.sheetSpacing>0 || config.holeSpacing>0)
+    throw std::invalid_argument("Clearance settings require algorithm: bitmap");
   PlacementResult out;
   if (sheets.empty()) {
     return out;
@@ -372,4 +379,4 @@ PlacementResult placeParts(std::vector<Polygon> sheets,
   return out;
 }
 
-}  // namespace deepnest
+}  // namespace clinesting

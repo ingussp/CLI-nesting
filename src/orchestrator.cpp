@@ -1,8 +1,8 @@
-#include "deepnestcpp/bitmap_nesting.hpp"
-#include "deepnestcpp/orchestrator.hpp"
+#include "clinesting/bitmap_nesting.hpp"
+#include "clinesting/orchestrator.hpp"
 
-#include "deepnestcpp/nfp.hpp"
-#include "deepnestcpp/placement.hpp"
+#include "clinesting/nfp.hpp"
+#include "clinesting/placement.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -12,10 +12,11 @@
 #include <thread>
 #include <vector>
 
-namespace deepnest {
+namespace clinesting {
 
 namespace {
 
+// Schedule only geometry pairs that are absent from the cache.
 void precomputeMissingPairs(const std::vector<NfpPair>& pairs, const Config& config, NfpCache& cache, int requestedThreads) {
   if (pairs.empty()) {
     return;
@@ -66,12 +67,15 @@ void precomputeMissingPairs(const std::vector<NfpPair>& pairs, const Config& con
 
 }  // namespace
 
+// Initialize the nesting coordinator and its cache.
 BackgroundOrchestrator::BackgroundOrchestrator(NfpCache cache) : cache_(std::move(cache)) {}
 
+// Execute the requested nesting work and return its result.
 PlacementResult BackgroundOrchestrator::run(BackgroundRequest data, EventSink& sink) {
   return runWithStats(std::move(data), sink).placement;
 }
 
+// Run nesting while retaining detailed timing and bitmap diagnostics.
 OrchestratorRunStats BackgroundOrchestrator::runWithStats(BackgroundRequest data, EventSink& sink,
                                                         const BitmapLayoutCallback& onLayout) {
   const auto t0 = std::chrono::steady_clock::now();
@@ -158,4 +162,4 @@ OrchestratorRunStats BackgroundOrchestrator::runWithStats(BackgroundRequest data
   return runStats;
 }
 
-}  // namespace deepnest
+}  // namespace clinesting
