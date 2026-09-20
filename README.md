@@ -232,6 +232,33 @@ These keys are accepted in settings, config or CLI-nesting.
 | `partToHole` | 0 mm | Margin involving hole edges |
 | `gpu` | false | Boolean or OpenCL object described below |
 
+### Search strategies (trials)
+
+`trials` is integer 1..4 (default 2) and applies only to the bitmap algorithm.
+It selects how many independent nesting strategies run per search round. Each
+strategy builds a complete layout from scratch with a different tactic, and the
+best validated layout is kept. Strategies run in parallel, one worker thread per
+strategy (up to `threads`), so more trials cost proportionally more time and
+memory.
+
+| # | Strategy | What it does |
+|---|---|---|
+| 1 | `compact` | Greedy compact search in the input part order. This is the baseline. |
+| 2 | `pair_rows` | Enables repeated pair/row pattern placement: when at least six identical copies remain, it reuses a detected pair/row pattern instead of scanning every candidate position. |
+| 3 | `large_first` | Sorts remaining parts by material area descending and places the largest first. |
+| 4 | `small_first` | Sorts remaining parts by material area ascending and places the smallest first. |
+
+The winner is chosen by, in order: fewest unplaced copies, then fewest accepted
+placements, then the smallest occupied bounding rectangle. The chosen index is
+reported as `selectedTrial`, and each strategy's count, duration, completion and
+phase timings appear in `strategyResults`.
+
+`trials` takes effect only in `mode: "timed"` and `mode: "continuous"`.
+Mode `first` always runs the single `compact` strategy and ignores `trials`.
+Jobs with fewer than six part copies also always use one strategy, because
+`pair_rows` needs at least six identical parts and the sort-based strategies need
+shape variety to matter.
+
 ### First layout
 
 Mode first runs one complete greedy compact strategy across available sheets
