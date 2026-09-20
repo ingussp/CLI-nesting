@@ -7,7 +7,7 @@
       "generator": "Visual Studio 17 2022",
       "architecture": "x64",
       "binaryDir": "${sourceDir}/build-release",
-      "cacheVariables": { "DEEPNEST_STATIC_RUNTIME": "ON" }
+      "cacheVariables": { "CLINESTING_STATIC_RUNTIME": "ON" }
     }
   ],
   "buildPresets": [

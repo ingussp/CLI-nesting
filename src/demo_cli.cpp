@@ -1,17 +1,18 @@
-#include "deepnestcpp/demo_cli.hpp"
+#include "clinesting/demo_cli.hpp"
 
-#include "deepnestcpp/demo_setup.hpp"
-#include "deepnestcpp/model.hpp"
+#include "clinesting/demo_setup.hpp"
+#include "clinesting/model.hpp"
 
 #include <cmath>
 #include <exception>
 #include <stdexcept>
 #include <string>
 
-namespace deepnest {
+namespace clinesting {
 
 namespace {
 
+// Validate a bounded positive integer demo option.
 int parsePositiveValue(std::string_view raw, const char* flagName) {
   try {
     const int value = std::stoi(std::string(raw));
@@ -24,6 +25,7 @@ int parsePositiveValue(std::string_view raw, const char* flagName) {
   }
 }
 
+// Validate a positive finite numeric demo option.
 double parsePositiveDouble(std::string_view raw, const char* flagName) {
   try {
     const double value = std::stod(std::string(raw));
@@ -36,6 +38,7 @@ double parsePositiveDouble(std::string_view raw, const char* flagName) {
   }
 }
 
+// Translate the requested demo backend name into an enum.
 NestingAlgorithm parseAlgorithm(std::string_view raw) {
   if (raw == "nfp") {
     return NestingAlgorithm::Nfp;
@@ -48,6 +51,7 @@ NestingAlgorithm parseAlgorithm(std::string_view raw) {
 
 }  // namespace
 
+// Validate and translate demonstration command-line options.
 DemoCliOptions parseDemoCliOptions(const std::vector<std::string_view>& args) {
   DemoCliOptions options{
       kDefaultDemoPartCount, defaultWorkerCount(), NestingAlgorithm::Nfp, 1.0, 1, false, std::nullopt, false};
@@ -115,4 +119,4 @@ DemoCliOptions parseDemoCliOptions(const std::vector<std::string_view>& args) {
   return options;
 }
 
-}  // namespace deepnest
+}  // namespace clinesting

@@ -1,6 +1,6 @@
-#include "deepnestcpp/dxf_export.hpp"
+#include "clinesting/dxf_export.hpp"
 
-#include "deepnestcpp/geometry.hpp"
+#include "clinesting/geometry.hpp"
 
 #include <algorithm>
 #include <fstream>
@@ -10,32 +10,38 @@
 #include <stdexcept>
 #include <unordered_map>
 
-namespace deepnest {
+namespace clinesting {
 
 namespace {
 
 using IndexBuckets = std::unordered_map<std::string, std::vector<size_t>>;
 
+// Read the optional physical instance identifier from a placement.
 const std::optional<int>& placementId(const Placement& placement) {
   return placement.id;
 }
 
+// Read the optional physical instance identifier from a placement.
 const std::optional<int>& placementId(const SheetPlacement& placement) {
   return placement.sheetid;
 }
 
+// Read the source geometry identifier from a placement.
 const std::string& placementSource(const Placement& placement) {
   return placement.source;
 }
 
+// Read the source geometry identifier from a placement.
 const std::string& placementSource(const SheetPlacement& placement) {
   return placement.sheet;
 }
 
+// Combine source and instance identifiers for export lookup.
 std::string makeSourceIdKey(const std::string& source, const std::optional<int>& id) {
   return source + '\x1F' + (id.has_value() ? std::to_string(*id) : std::string("null"));
 }
 
+// Index input geometry by source and optional instance ID.
 void indexBySourceAndId(const std::vector<Polygon>& polygons,
                         IndexBuckets& bySourceAndId,
                         IndexBuckets& byId,
@@ -49,6 +55,7 @@ void indexBySourceAndId(const std::vector<Polygon>& polygons,
   }
 }
 
+// Resolve an unused matching input entry for an output placement.
 std::optional<size_t> consumeIndex(const std::vector<size_t>& bucket,
                                    std::vector<bool>& consumed,
                                    std::unordered_map<std::string, size_t>& cursors,
@@ -66,12 +73,15 @@ std::optional<size_t> consumeIndex(const std::vector<size_t>& bucket,
   return idx;
 }
 
+// Resolve placement identities to original input geometry for DXF.
 class PlacementResolver {
  public:
+  // Initialize source/instance lookup for DXF geometry.
   explicit PlacementResolver(const std::vector<Polygon>& polygons) : polygons_(polygons), consumed_(polygons.size(), false) {
     indexBySourceAndId(polygons_, bySourceAndId_, byId_, bySource_);
   }
 
+  // Resolve an exported placement to the corresponding input contour.
   template <typename PlacementLike>
   const Polygon& resolve(const PlacementLike& placement, const std::string& kind) {
     std::optional<size_t> resolved;
@@ -125,16 +135,19 @@ class PlacementResolver {
   std::unordered_map<std::string, size_t> cursors_;
 };
 
+// Format a coordinate without locale-specific DXF syntax.
 std::string formatDouble(double value) {
   std::ostringstream oss;
   oss << std::fixed << std::setprecision(6) << value;
   return oss.str();
 }
 
+// Write one DXF group-code and value pair.
 void writePair(std::ostream& out, int code, const std::string& value) {
   out << code << "\n" << value << "\n";
 }
 
+// Emit a named layer in the DXF layer table.
 void writeLayer(std::ostream& out, const std::string& layerName, int color) {
   writePair(out, 0, "LAYER");
   writePair(out, 2, layerName);
@@ -143,6 +156,7 @@ void writeLayer(std::ostream& out, const std::string& layerName, int color) {
   writePair(out, 6, "CONTINUOUS");
 }
 
+// Normalize a contour before writing its DXF polyline.
 std::vector<Point> normalizedPolyline(const std::vector<Point>& points) {
   if (points.empty()) {
     return {};
@@ -154,6 +168,7 @@ std::vector<Point> normalizedPolyline(const std::vector<Point>& points) {
   return out;
 }
 
+// Write a closed DXF polyline from contour points.
 void writePolyline(std::ostream& out, const std::vector<Point>& points, const std::string& layerName) {
   const auto normalized = normalizedPolyline(points);
   if (normalized.size() < 2) {
@@ -170,6 +185,7 @@ void writePolyline(std::ostream& out, const std::vector<Point>& points, const st
   }
 }
 
+// Write child contours as hole polylines.
 void writeHolesRecursive(std::ostream& out, const Polygon& polygon) {
   for (const auto& child : polygon.children) {
     writePolyline(out, child.points, "HOLES");
@@ -177,6 +193,7 @@ void writeHolesRecursive(std::ostream& out, const Polygon& polygon) {
   }
 }
 
+// Write a text label at the requested DXF position.
 void writeLabel(std::ostream& out, const Polygon& polygon, const std::string& text, double height) {
   if (text.empty() || polygon.points.empty()) {
     return;
@@ -193,6 +210,7 @@ void writeLabel(std::ostream& out, const Polygon& polygon, const std::string& te
   writePair(out, 1, text);
 }
 
+// Write DXF headers, tables and the start of the entity section.
 void writeDxfPrefix(std::ostream& out) {
   writePair(out, 0, "SECTION");
   writePair(out, 2, "HEADER");
@@ -214,6 +232,7 @@ void writeDxfPrefix(std::ostream& out) {
   writePair(out, 2, "ENTITIES");
 }
 
+// Close the DXF entity section and file.
 void writeDxfSuffix(std::ostream& out) {
   writePair(out, 0, "ENDSEC");
   writePair(out, 0, "EOF");
@@ -221,6 +240,7 @@ void writeDxfSuffix(std::ostream& out) {
 
 }  // namespace
 
+// Write placed parts and stock as genuine DXF entities.
 void exportPlacementResultToDxf(const std::filesystem::path& outputPath,
                                 const std::vector<Polygon>& sourceSheets,
                                 const std::vector<Polygon>& sourceParts,
@@ -268,4 +288,4 @@ void exportPlacementResultToDxf(const std::filesystem::path& outputPath,
   writeDxfSuffix(out);
 }
 
-}  // namespace deepnest
+}  // namespace clinesting

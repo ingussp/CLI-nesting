@@ -1,6 +1,6 @@
-#include "deepnestcpp/nfp.hpp"
+#include "clinesting/nfp.hpp"
 
-#include "deepnestcpp/geometry.hpp"
+#include "clinesting/geometry.hpp"
 
 #include <algorithm>
 #include <clipper2/clipper.h>
@@ -8,22 +8,25 @@
 #include <optional>
 #include <unordered_map>
 
-namespace deepnest {
+namespace clinesting {
 
 using namespace Clipper2Lib;
 
 namespace {
 
+// Convert an integer clipping path into a nesting polygon.
 Polygon pathToPolygon(const Path64& p, double scale) {
   Polygon poly;
   poly.points = toNestCoordinates(p, scale);
   return poly;
 }
 
+// Compute bounds used by no-fit geometry calculations.
 Bounds getBounds(const Polygon& p) {
   return getPolygonBounds(p.points);
 }
 
+// Construct an outer no-fit polygon with a Minkowski operation.
 std::optional<Polygon> minkowskiOuter(const Polygon& A, const Polygon& B, const Config& config) {
   if (A.points.empty() || B.points.empty()) {
     return std::nullopt;
@@ -64,6 +67,7 @@ std::optional<Polygon> minkowskiOuter(const Polygon& A, const Polygon& B, const 
   return nfp;
 }
 
+// Build clipping paths for usable container material.
 Paths64 materialContainerPaths(const Polygon& A, const Config& config) {
   Paths64 outer{outerPathToClipperCoordinates(A, config)};
   auto holes = childPathsToClipperCoordinates(A, config);
@@ -75,6 +79,7 @@ Paths64 materialContainerPaths(const Polygon& A, const Config& config) {
 
 }  // namespace
 
+// Build the enclosing frame used to derive inner no-fit polygons.
 Polygon getFrame(const Polygon& A) {
   Bounds bounds = getBounds(A);
   const double originalW = bounds.width;
@@ -97,6 +102,7 @@ Polygon getFrame(const Polygon& A) {
   return frame;
 }
 
+// Compute or retrieve feasible positions inside a container polygon.
 std::optional<std::vector<Polygon>> getInnerNfp(const Polygon& A,
                                                 const Polygon& B,
                                                 const Config& config,
@@ -157,6 +163,7 @@ std::optional<std::vector<Polygon>> getInnerNfp(const Polygon& A,
   return result;
 }
 
+// Compute or retrieve forbidden relative positions for two polygons.
 std::optional<Polygon> getOuterNfp(const Polygon& A,
                                    const Polygon& B,
                                    bool inside,
@@ -199,8 +206,10 @@ std::optional<Polygon> getOuterNfp(const Polygon& A,
   return nfp;
 }
 
+// Populate cached no-fit geometry for missing polygon pairs.
 std::vector<NfpPair> preprocessMissingPairs(const std::vector<Polygon>& parts, NfpCache& cache) {
   std::vector<NfpPair> pairs;
+  // Keep a representative shape/orientation for batched preprocessing.
   struct RepresentativePart {
     Polygon polygon;
     std::string identity;
@@ -249,4 +258,4 @@ std::vector<NfpPair> preprocessMissingPairs(const std::vector<Polygon>& parts, N
   return pairs;
 }
 
-}  // namespace deepnest
+}  // namespace clinesting

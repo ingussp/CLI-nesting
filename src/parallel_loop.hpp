@@ -7,12 +7,13 @@
 #include <thread>
 #include <vector>
 
-namespace deepnest {
+namespace clinesting {
 
 // One caller and persistent helpers. A run is a barrier: captured input and
 // per-worker output remain owned by the caller until every helper has finished.
 class ParallelLoop {
  public:
+  // Initialize persistent workers for repeated parallel loops.
   explicit ParallelLoop(size_t count) : count_(count) {
     try {
       for(size_t slot=1;slot<count_;++slot) workers_.emplace_back([this,slot] {
@@ -31,8 +32,11 @@ class ParallelLoop {
       });
     } catch(...) { stop(); throw; }
   }
+  // Stop and join every persistent worker.
   ~ParallelLoop() { stop(); }
+  // Return the number of execution slots in the worker pool.
   size_t size() const { return count_; }
+  // Distribute a range across the persistent worker slots and wait for completion.
   template<class F> void run(size_t count,F&& f) {
     {
       std::lock_guard lock(mutex_);
@@ -49,10 +53,12 @@ class ParallelLoop {
     if(error_) std::rethrow_exception(error_);
   }
  private:
+  // Process one worker slot's assigned range and capture failures.
   void execute(size_t slot) {
     try { task_(slot); }
     catch(...) { std::lock_guard lock(mutex_); if(!error_) error_=std::current_exception(); }
   }
+  // Signal shutdown and join the persistent worker threads.
   void stop() {
     { std::lock_guard lock(mutex_); stopping_=true; }
     ready_.notify_all();

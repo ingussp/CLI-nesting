@@ -1,8 +1,8 @@
-#include "deepnestcpp/demo_setup.hpp"
+#include "clinesting/demo_setup.hpp"
 
 #include <stdexcept>
 
-namespace deepnest {
+namespace clinesting {
 
 namespace {
 
@@ -10,6 +10,7 @@ constexpr const char* kDemoPartSource = "neregulara_zvaigzne";
 constexpr const char* kDemoPartFilename = "neregulara_zvaigzne.svg";
 constexpr const char* kDemoPartGeometryKey = "svg:neregulara_zvaigzne:normalized-after-transform";
 
+// Construct an axis-aligned rectangular demonstration contour.
 Polygon makeRect(double x, double y, double w, double h, const std::string& source, std::optional<int> id) {
   Polygon p;
   p.points = {{x, y, true}, {x + w, y, true}, {x + w, y + h, true}, {x, y + h, true}};
@@ -20,6 +21,7 @@ Polygon makeRect(double x, double y, double w, double h, const std::string& sour
 
 }  // namespace
 
+// Construct the reusable star contour for demonstration jobs.
 Polygon makeDemoStarPolygon() {
   Polygon star;
   star.points = {
@@ -38,6 +40,7 @@ Polygon makeDemoStarPolygon() {
   return star;
 }
 
+// Generate uniquely identified copies of the demonstration star.
 std::vector<Polygon> makeDemoStarParts(int count) {
   if (count <= 0) {
     throw std::invalid_argument("count must be positive");
@@ -54,8 +57,9 @@ std::vector<Polygon> makeDemoStarParts(int count) {
   return parts;
 }
 
+// Construct the stock polygon used by demonstration jobs.
 Polygon makeDemoSheet() {
   return makeRect(0.0, 0.0, kDemoSheetWidthMm, kDemoSheetHeightMm, "sheet_1500x1500", 1);
 }
 
-}  // namespace deepnest
+}  // namespace clinesting

@@ -1,8 +1,8 @@
-#include "deepnestcpp/bitmap_nesting.hpp"
+#include "clinesting/bitmap_nesting.hpp"
 
-#include "deepnestcpp/geometry.hpp"
-#include "deepnestcpp/nfp.hpp"
-#include "deepnestcpp/gpu_bitmap.hpp"
+#include "clinesting/geometry.hpp"
+#include "clinesting/nfp.hpp"
+#include "clinesting/gpu_bitmap.hpp"
 #include "parallel_loop.hpp"
 #include "search_deadline.hpp"
 #include <random>
@@ -38,18 +38,21 @@
 #include <immintrin.h>
 #endif
 
-namespace deepnest {
+namespace clinesting {
 
 namespace {
 
 constexpr size_t kMaxBitmapPixels = 200000000ULL;
 
+// Accumulate elapsed time into a search-phase counter on scope exit.
 struct PhaseTimer {
   double& total;
   std::chrono::steady_clock::time_point start{std::chrono::steady_clock::now()};
+  // Add this scope's elapsed duration to its phase total.
   ~PhaseTimer() { total+=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-start).count(); }
 };
 
+// Convert a physical dimension to a bounded positive pixel count.
 int rasterDimension(double mm, double resolution) {
   const double pixels=std::ceil(mm/resolution);
   if (!std::isfinite(pixels) || pixels>double(kMaxBitmapPixels))
@@ -57,6 +60,7 @@ int rasterDimension(double mm, double resolution) {
   return std::max(1,static_cast<int>(pixels));
 }
 
+// Store a row-packed bitmap of stock or occupied material.
 struct BitmapGrid {
   int widthPx{0};
   int heightPx{0};
@@ -64,6 +68,7 @@ struct BitmapGrid {
   std::vector<uint64_t> bits;
 };
 
+// Store one rotated contour, contact points and lazy raster pixels.
 struct RasterMask {
   Polygon rotatedPart;
   double rotationDeg{0.0};
@@ -81,10 +86,13 @@ struct RasterMask {
 // Uniform spatial bins only select neighbours. Original polygons remain authoritative.
 class SpatialIndex {
  public:
+  // Initialize uniform bins for nearby polygon lookup.
   explicit SpatialIndex(double cellSize) : cellSize_(cellSize) {}
+  // Add an entry to the current spatial or rejected-origin index.
   void insert(const Bounds& b, size_t id) {
     visit(b, [&](uint64_t key) { cells_[key].push_back(id); });
   }
+  // Collect unique nearby polygon indices intersecting a query rectangle.
   std::vector<size_t> query(const Bounds& b) const {
     std::vector<size_t> ids;
     visit(b, [&](uint64_t key) {
@@ -96,6 +104,7 @@ class SpatialIndex {
     return ids;
   }
  private:
+  // Visit the spatial cells touched by a bounding rectangle.
   template<class F> void visit(const Bounds& b, F f) const {
     const int x0 = static_cast<int>(std::floor(b.x / cellSize_));
     const int y0 = static_cast<int>(std::floor(b.y / cellSize_));
@@ -109,12 +118,14 @@ class SpatialIndex {
   std::unordered_map<uint64_t, std::vector<size_t>> cells_;
 };
 
+// Record an accepted mask and origin for reusable proposals.
 struct RasterPlacement {
   int x, y;
   const RasterMask* mask;
   std::string identity;
 };
 
+// Store one candidate origin, rotation and ranking information.
 struct Candidate {
   int x, y;
   size_t rotation;
@@ -127,15 +138,19 @@ struct Candidate {
 struct RejectedOrigins {
   uint64_t rows{0}, rotations{0}, size{0};
   std::vector<uint64_t> bits;
+  // Flatten an origin and rotation into the rejected-position bitmap.
   uint64_t index(int x, int y, size_t r) const {
     return (uint64_t(x) * rows + uint64_t(y)) * rotations + r;
   }
+  // Check whether a rejected-origin bit is already set.
   bool contains(uint64_t i) const {
     return !bits.empty() && i < size && (bits[i / 64] & (uint64_t(1) << (i % 64)));
   }
+  // Add an entry to the current spatial or rejected-origin index.
   void insert(uint64_t i) {
     if (!bits.empty() && i < size) bits[i / 64] |= uint64_t(1) << (i % 64);
   }
+  // Advance to the next available cached origin or pattern position.
   uint64_t next(uint64_t i) const {
     if (bits.empty()) return i;
     while (i < size) {
@@ -147,6 +162,7 @@ struct RejectedOrigins {
   }
 };
 
+// Check whether two axis-aligned bounds overlap with positive extent.
 bool boundsIntersect(const Bounds& a, const Bounds& b) {
   const double aRight = a.x + a.width;
   const double aBottom = a.y + a.height;
@@ -155,6 +171,7 @@ bool boundsIntersect(const Bounds& a, const Bounds& b) {
   return !(aRight <= b.x || bRight <= a.x || aBottom <= b.y || bBottom <= a.y);
 }
 
+// Classify a point using ray crossings of a simple contour.
 bool pointInSimplePolygon(const std::vector<Point>& polygon, const Point& p) {
   if (polygon.size() < 3) {
     return false;
@@ -172,6 +189,7 @@ bool pointInSimplePolygon(const std::vector<Point>& polygon, const Point& p) {
   return inside;
 }
 
+// Check whether a point lies in the outline outside all holes.
 bool pointInPolygonMaterial(const Polygon& polygon, const Point& p) {
   if (!pointInSimplePolygon(polygon.points, p)) {
     return false;
@@ -184,6 +202,7 @@ bool pointInPolygonMaterial(const Polygon& polygon, const Point& p) {
   return true;
 }
 
+// Reject raster dimensions that exceed the allocation budget.
 void ensureBitmapFitsMemory(int widthPx, int heightPx, const char* what) {
   if (widthPx <= 0 || heightPx <= 0) {
     throw std::invalid_argument(std::string(what) + " raster dimensions must be positive");
@@ -195,6 +214,7 @@ void ensureBitmapFitsMemory(int widthPx, int heightPx, const char* what) {
   }
 }
 
+// Allocate an empty row-packed bitmap with validated dimensions.
 BitmapGrid makeBitmapGrid(int widthPx, int heightPx) {
   ensureBitmapFitsMemory(widthPx, heightPx, "Bitmap");
   BitmapGrid grid;
@@ -205,14 +225,17 @@ BitmapGrid makeBitmapGrid(int widthPx, int heightPx) {
   return grid;
 }
 
+// Access the packed words belonging to a bitmap row.
 inline uint64_t* rowBits(BitmapGrid& grid, int y) {
   return &grid.bits[static_cast<size_t>(y) * grid.wordsPerRow];
 }
 
+// Access the packed words belonging to a bitmap row.
 inline const uint64_t* rowBits(const BitmapGrid& grid, int y) {
   return &grid.bits[static_cast<size_t>(y) * grid.wordsPerRow];
 }
 
+// Set one material pixel in a packed bitmap.
 void setPixel(BitmapGrid& grid, int x, int y) {
   if (x < 0 || y < 0 || x >= grid.widthPx || y >= grid.heightPx) {
     return;
@@ -221,6 +244,7 @@ void setPixel(BitmapGrid& grid, int x, int y) {
   grid.bits[idx] |= (1ULL << static_cast<unsigned>(x % 64));
 }
 
+// Detect runtime AVX2 support before choosing SIMD operations.
 bool avx2RuntimeAvailable() {
 #if defined(__x86_64__) || defined(__i386__) || defined(_M_X64) || defined(_M_IX86)
 #if defined(_MSC_VER)
@@ -248,6 +272,7 @@ bool avx2RuntimeAvailable() {
 }
 
 #if defined(__AVX2__)
+// Check aligned row collisions and containment with AVX2.
 bool rowsCollideAndInBoundsAvx2(const uint64_t* occ, const uint64_t* material, const uint64_t* mask, size_t words) {
   size_t i = 0;
   const size_t vecWords = (words / 4) * 4;
@@ -271,6 +296,7 @@ bool rowsCollideAndInBoundsAvx2(const uint64_t* occ, const uint64_t* material, c
   return false;
 }
 
+// Merge aligned mask words into occupancy using AVX2.
 void rowsOrAvx2(uint64_t* occ, const uint64_t* mask, size_t words) {
   size_t i = 0;
   const size_t vecWords = (words / 4) * 4;
@@ -286,6 +312,7 @@ void rowsOrAvx2(uint64_t* occ, const uint64_t* mask, size_t words) {
 }
 #endif
 
+// Check aligned row collisions and containment with scalar operations.
 bool rowsCollideAndInBoundsScalar(const uint64_t* occ, const uint64_t* material, const uint64_t* mask, size_t words) {
   for (size_t i = 0; i < words; ++i) {
     const uint64_t overlap = occ[i] & mask[i];
@@ -297,12 +324,14 @@ bool rowsCollideAndInBoundsScalar(const uint64_t* occ, const uint64_t* material,
   return false;
 }
 
+// Merge aligned mask words into occupancy without SIMD.
 void rowsOrScalar(uint64_t* occ, const uint64_t* mask, size_t words) {
   for (size_t i = 0; i < words; ++i) {
     occ[i] |= mask[i];
   }
 }
 
+// Prepare a rotated part's dimensions and simplified contact points.
 RasterMask rasterizePartMask(const Polygon& part, double rotationDeg, double resolutionMm, double tolerance) {
   RasterMask mask;
   mask.rotationDeg = rotationDeg;
@@ -367,7 +396,9 @@ void rasterizeMaskPixels(const RasterMask& mask, double resolutionMm, const Sear
 // stable pointers to the mask's geometry. Rebuild it on demand after eviction.
 class RasterPixels {
  public:
+  // Initialize the bounded lazy raster cache.
   explicit RasterPixels(double resolution,const SearchDeadline& deadline) : resolution_(resolution),deadline_(deadline) {}
+  // Materialize a mask while respecting cache and cancellation limits.
   void ensure(const RasterMask& mask,bool cancellable=true) {
     if(cancellable) deadline_.check();
     if (!mask.bits.empty()) return;
@@ -393,6 +424,7 @@ class RasterPixels {
   std::deque<const RasterMask*> resident_;
 };
 
+// Convert usable stock, excluding holes, into a material bitmap.
 BitmapGrid rasterizeSheetMaterial(const Polygon& sheet, double resolutionMm, Bounds& sheetBounds,const SearchDeadline& deadline) {
   sheetBounds = getPolygonBounds(sheet.points);
   const int widthPx = rasterDimension(sheetBounds.width,resolutionMm);
@@ -413,12 +445,14 @@ BitmapGrid rasterizeSheetMaterial(const Polygon& sheet, double resolutionMm, Bou
   return material;
 }
 
+// Read a mask word after applying a bit-level horizontal shift.
 uint64_t shiftedMaskWord(const uint64_t* src, size_t srcWords, size_t wordIndex, int bitShift) {
   const uint64_t lo = wordIndex < srcWords ? src[wordIndex] : 0ULL;
   const uint64_t hi = wordIndex > 0 && wordIndex - 1 < srcWords ? src[wordIndex - 1] : 0ULL;
   return (lo << bitShift) | (hi >> (64 - bitShift));
 }
 
+// Check unaligned row collisions and stock containment.
 bool rowsCollideAndInBoundsShiftedScalar(const uint64_t* occ,
                                          const uint64_t* material,
                                          const uint64_t* maskRow,
@@ -433,12 +467,14 @@ bool rowsCollideAndInBoundsShiftedScalar(const uint64_t* occ,
   return false;
 }
 
+// Merge an unaligned mask row into sheet occupancy.
 void rowsOrShiftedScalar(uint64_t* occ, const uint64_t* maskRow, size_t maskWords, int bitShift, size_t shiftedWords) {
   for (size_t i = 0; i < shiftedWords; ++i) {
     occ[i] |= shiftedMaskWord(maskRow, maskWords, i, bitShift);
   }
 }
 
+// Check whether a translated mask fits stock without bitmap collisions.
 bool maskFits(const BitmapGrid& occupancy,
               const BitmapGrid& material,
               const RasterMask& mask,
@@ -486,6 +522,7 @@ bool maskFits(const BitmapGrid& occupancy,
   return true;
 }
 
+// Commit an accepted mask to the sheet occupancy bitmap.
 void applyMask(BitmapGrid& occupancy, const RasterMask& mask, int originX, int originY, bool useAvx2) {
   const int wordShift = originX / 64;
   const int bitShift = originX % 64;
@@ -510,12 +547,14 @@ void applyMask(BitmapGrid& occupancy, const RasterMask& mask, int originX, int o
   }
 }
 
+// Identify one shape and precise orientation for raster caching.
 std::string bitmapMaskCacheKey(const Polygon& part, double rotation) {
   std::ostringstream key;
   key<<polygonGeometryIdentity(part)<<'|'<<std::setprecision(17)<<rotation;
   return key.str();
 }
 
+// Combine geometry and permitted orientations for reusable searches.
 std::string searchPolicyKey(const Polygon& part) {
   std::ostringstream key;
   key<<bitmapMaskCacheKey(part,part.rotation);
@@ -526,11 +565,14 @@ std::string searchPolicyKey(const Polygon& part) {
   return key.str();
 }
 
+// Describe a repeated two-part row layout and its enumeration cursor.
 struct PairPattern {
   Candidate a{0,0,0}, b{0,0,0};
   int width{0}, height{0}, columns{0}, rows{0}, members{1};
   uint64_t cursor{0};
+  // Return the number of positions available in a repeated pattern.
   uint64_t capacity() const { return uint64_t(columns) * rows * members; }
+  // Advance to the next available cached origin or pattern position.
   Candidate next() {
     const auto index = cursor++;
     const auto cell = index / members;
@@ -564,7 +606,7 @@ PairPattern makePairPattern(const std::vector<const RasterMask*>& masks, int she
           {a.x*config.bitmapResolutionMm-am.minX,a.y*config.bitmapResolutionMm-am.minY,true});
       const auto pb = shiftPolygon(bm.rotatedPart,
           {b.x*config.bitmapResolutionMm-bm.minX,b.y*config.bitmapResolutionMm-bm.minY,true});
-      if (hasMaterialOverlap(pa,pb,config)) return;
+      if (violatesPartClearance(pa,pb,config)) return;
       auto occupied = makeBitmapGrid(w,h);
       auto material = makeBitmapGrid(w,h);
       std::fill(material.bits.begin(),material.bits.end(),~uint64_t(0));
@@ -595,6 +637,7 @@ PairPattern makePairPattern(const std::vector<const RasterMask*>& masks, int she
   return best;
 }
 
+// Search and validate part placements on one stock sheet.
 PlacementResult placePartsBitmapOnSingleSheet(const Polygon& sheet,
                                               const std::vector<Polygon>& parts,
                                               const Config& config,
@@ -795,17 +838,20 @@ PlacementResult placePartsBitmapOnSingleSheet(const Polygon& sheet,
       const Bounds absoluteBounds{sheetBounds.x + x * config.bitmapResolutionMm,
                                   sheetBounds.y + y * config.bitmapResolutionMm,
                                   mask->rotatedBounds.width, mask->rotatedBounds.height};
-      if (config.bitmapValidateGeometry) {
+      if (config.bitmapValidateGeometry || config.spacing>0 || config.sheetSpacing>0 || config.holeSpacing>0) {
         Polygon absolute = shiftPolygon(mask->rotatedPart, {shiftX, shiftY, true});
-        if (hasMaterialOutsideSheet(absolute, sheet, config)) {
+        if (violatesSheetClearance(absolute, sheet, config)) {
           rejected.insert(origin);
           ++partVectorValidationRejects;
           return false;
         }
-        for (size_t id : neighbours.query(absoluteBounds)) {
-          if (!boundsIntersect(absoluteBounds, placedBounds[id])) continue;
+        const double gap=std::min(std::max(config.spacing,config.holeSpacing),std::max(sheetBounds.width,sheetBounds.height));
+        const Bounds expanded{absoluteBounds.x-gap,absoluteBounds.y-gap,
+                              absoluteBounds.width+2*gap,absoluteBounds.height+2*gap};
+        for (size_t id : neighbours.query(expanded)) {
+          if (!boundsIntersect(expanded, placedBounds[id])) continue;
           ++localStats.neighbourGeometryChecks;
-          if (hasMaterialOverlap(absolute, placedAbsolute[id], config)) {
+          if (violatesPartClearance(absolute, placedAbsolute[id], config)) {
             rejected.insert(origin);
             ++partVectorValidationRejects;
             return false;
@@ -869,12 +915,17 @@ PlacementResult placePartsBitmapOnSingleSheet(const Polygon& sheet,
         deadline.check();
         const size_t first=localCandidates.size();
         const auto* m = rotationMasks[r];
-        propose(0, 0, r);
+        const double maxGap=double(std::max(material.widthPx,material.heightPx))+1;
+        const int edgeGap=static_cast<int>(std::min(maxGap,std::ceil(config.sheetSpacing/config.bitmapResolutionMm)));
+        const int partGap=static_cast<int>(std::min(maxGap,std::ceil(config.spacing/config.bitmapResolutionMm)));
+        propose(edgeGap, edgeGap, r);
         for (size_t i = frontierStart; i < rasterPlacements.size(); ++i) {
           const auto& q = rasterPlacements[i];
           const int right = q.x + q.mask->widthPx, top = q.y + q.mask->heightPx;
           // Bounding-box contacts cheaply grow rows and columns around the occupied region.
           propose(right, q.y, r); propose(q.x, top, r);
+          propose(right+partGap, q.y, r); propose(q.x, top+partGap, r);
+          propose(q.x-m->widthPx-partGap,q.y,r); propose(q.x,q.y-m->heightPx-partGap,r);
           propose(right - m->widthPx, top, r); propose(right, top - m->heightPx, r);
           propose(q.x - m->widthPx, q.y, r); propose(q.x, q.y - m->heightPx, r);
           // A bounded recent frontier adds interlocking proposals for concave parts.
@@ -1157,6 +1208,7 @@ PlacementResult placePartsBitmapOnSingleSheet(const Polygon& sheet,
 
 }  // namespace
 
+// Report whether this build and CPU can use AVX2 bitmap operations.
 bool bitmapAvx2Supported() {
 #if defined(__AVX2__)
   return avx2RuntimeAvailable();
@@ -1165,6 +1217,7 @@ bool bitmapAvx2Supported() {
 #endif
 }
 
+// Run bitmap strategies and retain the best validated layout.
 PlacementResult placePartsBitmap(const std::vector<Polygon>& sheets,
                                  const std::vector<Polygon>& parts,
                                  const Config& config,
@@ -1176,6 +1229,9 @@ PlacementResult placePartsBitmap(const std::vector<Polygon>& sheets,
   }
   if(config.gpuBatchSize<256 || config.gpuBatchSize>262144 || config.gpuDevice < -1)
     throw std::invalid_argument("Invalid GPU configuration");
+  for(double gap:{config.spacing,config.sheetSpacing,config.holeSpacing})
+    if(!std::isfinite(gap) || gap<0 || gap>1000000)
+      throw std::invalid_argument("Clearances must be finite numbers between 0 and 1000000 mm");
   if (!std::isfinite(config.bitmapResolutionMm) || config.bitmapResolutionMm <= 0.0) {
     throw std::invalid_argument("--bitmap-resolution must be a positive number");
   }
@@ -1208,6 +1264,7 @@ PlacementResult placePartsBitmap(const std::vector<Polygon>& sheets,
     return (p.allowedAngles.empty() ? size_t(config.rotations) : p.allowedAngles.size())>64;
   });
   const int helpersPerTrial=fineAngles ? std::max(1,std::min(defaultWorkerCount(),normalizeWorkerCount(config.threads))/workerCount) : 1;
+  // Keep one independently executed strategy's result and diagnostics.
   struct Trial { PlacementResult result; BitmapNestingStats stats; double elapsedMs{0}; bool started{false}; };
   std::vector<Trial> trials(size_t(trialCount), Trial{});
   std::atomic<int> next{0};
@@ -1344,4 +1401,4 @@ PlacementResult placePartsBitmap(const std::vector<Polygon>& sheets,
   return std::move(winner.result);
 }
 
-}  // namespace deepnest
+}  // namespace clinesting

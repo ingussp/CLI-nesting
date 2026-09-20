@@ -1,4 +1,4 @@
-#include "deepnestcpp/gpu_bitmap.hpp"
+#include "clinesting/gpu_bitmap.hpp"
 #define CL_TARGET_OPENCL_VERSION 120
 #include <CL/cl.h>
 #include <algorithm>
@@ -14,11 +14,13 @@
 #include <dlfcn.h>
 #endif
 
-namespace deepnest {
+namespace clinesting {
 namespace {
+// Throw when a runtime operation reports an error or deadline expiry.
 void check(cl_int error, const char* operation) {
   if(error!=CL_SUCCESS) throw std::runtime_error(std::string("OpenCL ")+operation+" failed ("+std::to_string(error)+")");
 }
+// Load OpenCL entry points without a link-time GPU runtime dependency.
 struct Api {
 #ifdef _WIN32
   HMODULE library{};
@@ -34,6 +36,7 @@ struct Api {
 #define DECLARE(name) decltype(&::name) name{};
   CL_FUNCTIONS(DECLARE)
 #undef DECLARE
+  // Initialize the dynamically loaded OpenCL interface.
   Api() {
 #ifdef _WIN32
     library=LoadLibraryExW(L"OpenCL.dll",nullptr,LOAD_LIBRARY_SEARCH_SYSTEM32);
@@ -47,7 +50,9 @@ struct Api {
 #undef LOAD
     } catch(...) { close(); throw; }
   }
+  // Unload the dynamically opened OpenCL library.
   ~Api() { close(); }
+  // Close the loaded OpenCL library handle.
   void close() {
 #ifdef _WIN32
     if(library) FreeLibrary(library);
@@ -56,6 +61,7 @@ struct Api {
 #endif
     library=nullptr;
   }
+  // Resolve a required OpenCL function from the loaded library.
   void* symbol(const char* name) {
 #ifdef _WIN32
     auto p=GetProcAddress(library,name);
@@ -66,15 +72,19 @@ struct Api {
     return reinterpret_cast<void*>(p);
   }
 };
+// Pair an OpenCL device handle with its public description.
 struct Device { cl_device_id id; GpuDeviceInfo info; bool unified; cl_uint units; };
+// Read a string-valued property from an OpenCL device.
 std::string deviceString(Api& api,cl_device_id id,cl_device_info key) {
   size_t size=0; check(api.clGetDeviceInfo(id,key,0,nullptr,&size),"device info size");
   std::string text(size,'\0'); check(api.clGetDeviceInfo(id,key,size,text.data(),nullptr),"device info");
   if(!text.empty() && text.back()=='\0') text.pop_back(); return text;
 }
+// Read a scalar-valued property from an OpenCL device.
 template<class T> T deviceValue(Api& api,cl_device_id id,cl_device_info key) {
   T value{}; check(api.clGetDeviceInfo(id,key,sizeof(value),&value,nullptr),"device property"); return value;
 }
+// Enumerate eligible GPU devices across OpenCL platforms.
 std::vector<Device> devices(Api& api) {
   cl_uint count=0;
   const auto e=api.clGetPlatformIDs(0,nullptr,&count);
@@ -104,6 +114,7 @@ std::vector<Device> devices(Api& api) {
 const char* source=R"CLC(
 typedef struct { uint width, height, stride, offset; } Mask;
 typedef struct { int x, y; uint rotation; } Candidate;
+// Check one translated mask against occupied and permitted stock pixels.
 inline uchar fits(__global const ulong* occupied, __global const ulong* material,
                   __global const Mask* masks, __global const ulong* bits,
                   uint sw, uint sh, uint sheetStride, uint rotations, int x, int y, uint r) {
@@ -122,6 +133,7 @@ inline uchar fits(__global const ulong* occupied, __global const ulong* material
   }
   return 1;
 }
+// Filter explicit or implicit-grid candidates independently on GPU work items.
 __kernel void collision(__global const ulong* occupied, __global const ulong* material,
                         __global const Mask* masks, __global const ulong* bits,
                         __global const Candidate* candidates, __global uchar* output,
@@ -142,6 +154,7 @@ __kernel void collision(__global const ulong* occupied, __global const ulong* ma
 )CLC";
 }
 
+// Store OpenCL context, kernels and buffers behind the public interface.
 struct GpuBitmap::Impl {
   Api api;
   GpuDeviceInfo info;
@@ -155,6 +168,7 @@ struct GpuBitmap::Impl {
   bool occupancyReady=false;
   cl_ulong maxAllocation=0;
   cl_uint width=0,height=0,stride=0,rotations=0;
+  // Release OpenCL buffers, kernels, queues and context.
   ~Impl() {
     if(queue) api.clFinish(queue);
     for(auto m:{material,occupancy,masks,bits,candidates,output}) if(m) api.clReleaseMemObject(m);
@@ -163,6 +177,7 @@ struct GpuBitmap::Impl {
     if(queue) api.clReleaseCommandQueue(queue);
     if(context) api.clReleaseContext(context);
   }
+  // Create the selected device's context, queue and collision kernels.
   void initialize(int index) {
     const auto list=devices(api);
     if(list.empty()) throw std::runtime_error("No available OpenCL GPU found");
@@ -188,6 +203,7 @@ struct GpuBitmap::Impl {
     }
     kernel=api.clCreateKernel(program,"collision",&e); check(e,"create kernel");
   }
+  // Replace a GPU buffer with data sized for the next upload.
   void replace(cl_mem& memory,size_t bytes,cl_mem_flags flags,const void* data=nullptr) {
     if(!bytes || bytes>maxAllocation || bytes>512ULL*1024*1024)
       throw std::runtime_error("OpenCL buffer exceeds the GPU allocation limit (maximum 512 MiB per buffer)");
@@ -195,7 +211,9 @@ struct GpuBitmap::Impl {
     cl_int e=0; memory=api.clCreateBuffer(context,flags|(data?CL_MEM_COPY_HOST_PTR:0),bytes,const_cast<void*>(data),&e);
     check(e,"allocate buffer");
   }
+  // Assign a checked argument to the active OpenCL kernel.
   template<class T> void arg(cl_uint index,const T& value) { check(api.clSetKernelArg(kernel,index,sizeof(value),&value),"kernel argument"); }
+  // Execute a collision kernel and read back candidate validity flags.
   std::vector<uint8_t> run(uint32_t count,uint32_t mode,uint64_t first,uint32_t rows,uint32_t step,uint32_t ww,uint32_t wh,
                          std::span<const GpuCandidate> input={}) {
     if(!count) return {};
@@ -217,12 +235,17 @@ struct GpuBitmap::Impl {
     return flags;
   }
 };
+// Return public descriptions of available OpenCL GPUs.
 std::vector<GpuDeviceInfo> listGpuDevices() {
   Api api; std::vector<GpuDeviceInfo> out; for(const auto& d:devices(api)) out.push_back(d.info); return out;
 }
+// Initialize GPU collision filtering for the selected device.
 GpuBitmap::GpuBitmap(int index) : impl_(std::make_unique<Impl>()) { impl_->initialize(index); }
+// Release GPU filtering resources through the implementation owner.
 GpuBitmap::~GpuBitmap()=default;
+// Return the selected GPU's public device information.
 const GpuDeviceInfo& GpuBitmap::device() const { return impl_->info; }
+// Upload the permitted stock-material bitmap.
 void GpuBitmap::setSheet(uint32_t w,uint32_t h,std::span<const uint64_t> material) {
   const uint64_t stride=(uint64_t(w)+63)/64;
   if(!w || !h || material.size()!=stride*h || material.size()>UINT32_MAX) throw std::invalid_argument("Invalid GPU sheet dimensions");
@@ -231,11 +254,13 @@ void GpuBitmap::setSheet(uint32_t w,uint32_t h,std::span<const uint64_t> materia
   impl_->replace(impl_->material,material.size_bytes(),CL_MEM_READ_ONLY,material.data());
   impl_->replace(impl_->occupancy,material.size_bytes(),CL_MEM_READ_ONLY);
 }
+// Upload material already occupied by accepted parts.
 void GpuBitmap::setOccupancy(std::span<const uint64_t> occupancy) {
   if(occupancy.size_bytes()!=impl_->sheetBytes || !impl_->occupancy) throw std::invalid_argument("Invalid GPU occupancy size");
   check(impl_->api.clEnqueueWriteBuffer(impl_->queue,impl_->occupancy,CL_TRUE,0,occupancy.size_bytes(),occupancy.data(),0,nullptr,nullptr),"upload occupancy");
   impl_->occupancyReady=true;
 }
+// Upload packed rotation masks and their dimensions.
 void GpuBitmap::setMasks(std::span<const GpuMaskInfo> masks,std::span<const uint64_t> words) {
   if(masks.empty() || masks.size()>3600 || words.size()>UINT32_MAX) throw std::invalid_argument("Invalid GPU masks");
   for(const auto& m:masks) if(!m.width || !m.height || m.wordsPerRow!=(uint64_t(m.width)+63)/64 ||
@@ -244,10 +269,12 @@ void GpuBitmap::setMasks(std::span<const GpuMaskInfo> masks,std::span<const uint
   impl_->replace(impl_->bits,words.size_bytes(),CL_MEM_READ_ONLY,words.data());
   impl_->rotations=cl_uint(masks.size());
 }
+// Evaluate a batch of explicit candidate placements on the GPU.
 std::vector<uint8_t> GpuBitmap::filter(std::span<const GpuCandidate> candidates) {
   if(candidates.size()>262144) throw std::invalid_argument("GPU batch is too large");
   return impl_->run(uint32_t(candidates.size()),0,0,1,1,impl_->width,impl_->height,candidates);
 }
+// Evaluate a contiguous range of an implicit candidate grid.
 std::vector<uint8_t> GpuBitmap::filterGrid(uint64_t first,uint32_t count,uint32_t rows,uint32_t step,uint32_t ww,uint32_t wh) {
   if(!rows || !step || !impl_->rotations || uint64_t(rows)*step>uint64_t(INT32_MAX) ||
       first>UINT64_MAX-count || (first+count)/impl_->rotations/rows>uint64_t(INT32_MAX)/step)
