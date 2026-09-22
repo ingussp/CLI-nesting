@@ -9,7 +9,6 @@
 
 namespace clinesting {
 
-enum class NestingAlgorithm { Nfp, Bitmap };
 enum class SearchMode { First, Timed, Continuous };
 
 // Return the detected logical CPU count with a one-worker fallback.
@@ -65,7 +64,6 @@ struct Config {
   // Equally spaced angles over one full turn: 3600 means a 0.1 degree step.
   int rotations{4};
   int threads{defaultWorkerCount()};
-  NestingAlgorithm algorithm{NestingAlgorithm::Nfp};
   double bitmapResolutionMm{1.0};
   int bitmapSearchStepPx{1};
   bool bitmapPreferAvx2{true};

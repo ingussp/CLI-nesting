@@ -206,7 +206,6 @@
     "partToHole": 2
   },
   "CLI-nesting": {
-    "algorithm": "bitmap",
     "mode": "first",
     "continuous": false,
     "timeLimitSeconds": 0,

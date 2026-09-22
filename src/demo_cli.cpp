@@ -38,23 +38,12 @@ double parsePositiveDouble(std::string_view raw, const char* flagName) {
   }
 }
 
-// Translate the requested demo backend name into an enum.
-NestingAlgorithm parseAlgorithm(std::string_view raw) {
-  if (raw == "nfp") {
-    return NestingAlgorithm::Nfp;
-  }
-  if (raw == "bitmap" || raw == "bit") {
-    return NestingAlgorithm::Bitmap;
-  }
-  throw std::invalid_argument("Unknown algorithm: " + std::string(raw) + ". Expected 'nfp' or 'bitmap'");
-}
-
 }  // namespace
 
 // Validate and translate demonstration command-line options.
 DemoCliOptions parseDemoCliOptions(const std::vector<std::string_view>& args) {
   DemoCliOptions options{
-      kDefaultDemoPartCount, defaultWorkerCount(), NestingAlgorithm::Nfp, 1.0, 1, false, std::nullopt, false};
+      kDefaultDemoPartCount, defaultWorkerCount(), 1.0, 1, false, std::nullopt, false};
 
   for (size_t i = 0; i < args.size(); ++i) {
     const std::string_view arg = args[i];
@@ -84,13 +73,6 @@ DemoCliOptions parseDemoCliOptions(const std::vector<std::string_view>& args) {
         throw std::invalid_argument("--output provided more than once");
       }
       options.outputPath = std::filesystem::path(args[++i]);
-      continue;
-    }
-    if (arg == "--algorithm") {
-      if (i + 1 >= args.size()) {
-        throw std::invalid_argument("Missing value for --algorithm");
-      }
-      options.algorithm = parseAlgorithm(args[++i]);
       continue;
     }
     if (arg == "--bitmap-resolution") {

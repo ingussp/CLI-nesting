@@ -185,11 +185,7 @@ void configure(const Json& j,Config& c) {
     } else if(k=="bitmapSearchStepPx" || k=="step") c.bitmapSearchStepPx=integer(v,k,1,100000);
     else if(k=="curveTolerance") { c.curveTolerance=number(v,k); if(c.curveTolerance<0) throw std::invalid_argument(k+" must be nonnegative"); }
     else if(k=="cacheRejects") { if(!v.is_boolean()) throw std::invalid_argument(k+" must be boolean"); c.bitmapCacheRejects=v.get<bool>(); }
-    else if(k=="algorithm") {
-      if(v=="bitmap") c.algorithm=NestingAlgorithm::Bitmap;
-      else if(v=="nfp") c.algorithm=NestingAlgorithm::Nfp;
-      else throw std::invalid_argument("algorithm must be bitmap or nfp");
-    } else if(k=="spacing" || k=="partToSheet" || k=="partToHole") {
+    else if(k=="spacing" || k=="partToSheet" || k=="partToHole") {
       const double gap=number(v,k);
       if(gap<0) throw std::invalid_argument(k+" must be nonnegative");
       if(k=="spacing") c.spacing=gap;
@@ -231,6 +227,7 @@ Json inputConfig(const Json& root) {
     const auto& block=root[field];
     if(!block.is_object()) throw std::invalid_argument(std::string(field)+" must be an object");
     for(auto it=block.begin();it!=block.end();++it) {
+      if(it.key()=="algorithm") continue;
       if(std::string_view(field)=="settings" && (it.key()=="units" || legacy.contains(it.key()))) continue;
       const auto key=it.key()=="sheetSpacing" ? "partToSheet" : it.key()=="holeSpacing" ? "partToHole" : it.key();
       if(key!=it.key() && block.contains(key) && block[key]!=it.value())
@@ -257,7 +254,6 @@ BackgroundRequest parseNestingJson(std::string_view text) {
     request.jobId=root.value("job_id",std::string{});
     request.createdAt=root.value("created_at",std::string{});
     if(root.contains("_ip_nesting")) request.metadataJson=root["_ip_nesting"].dump();
-    request.config.algorithm=NestingAlgorithm::Bitmap;
     request.config.placementType="box";
     configure(inputConfig(root),request.config);
     if(root.contains("output")) {
@@ -285,15 +281,6 @@ BackgroundRequest parseNestingJson(std::string_view text) {
       if(request.output.openPreview && request.output.svg.empty())
         throw std::invalid_argument("output.openPreview requires output.svg");
     }
-    if(request.config.mode!=SearchMode::First && request.config.algorithm!=NestingAlgorithm::Bitmap)
-      throw std::invalid_argument("timed/continuous modes require algorithm: bitmap");
-    if(request.config.continuous && request.config.algorithm!=NestingAlgorithm::Bitmap)
-      throw std::invalid_argument("Continuous search requires algorithm: bitmap");
-    if(request.config.gpuEnabled && request.config.algorithm!=NestingAlgorithm::Bitmap)
-      throw std::invalid_argument("GPU acceleration requires algorithm: bitmap");
-    if(request.config.algorithm!=NestingAlgorithm::Bitmap &&
-       (request.config.spacing>0 || request.config.sheetSpacing>0 || request.config.holeSpacing>0))
-      throw std::invalid_argument("Clearance settings require algorithm: bitmap");
     const auto& parts=root.at("parts");
     if(!parts.is_array() || parts.empty()) throw std::invalid_argument("parts must be a nonempty array");
     int instanceId=1;
@@ -316,10 +303,6 @@ BackgroundRequest parseNestingJson(std::string_view text) {
       if(request.sheets.size()+size_t(count)>1000) throw std::invalid_argument("At most 1000 sheets are supported");
       for(int n=0;n<count;++n) { p.id=sheetId++; request.sheets.push_back(p); }
     }
-    if(request.config.algorithm!=NestingAlgorithm::Bitmap &&
-       (request.config.timeLimitSeconds>0 || std::any_of(request.individual.placement.begin(),request.individual.placement.end(),
-         [](const Polygon& p) { return !p.allowedAngles.empty(); })))
-      throw std::invalid_argument("Per-part angles and time limits require algorithm: bitmap");
     return request;
   } catch(const Json::exception& e) { throw std::invalid_argument(std::string("Invalid nesting JSON: ")+e.what()); }
 }

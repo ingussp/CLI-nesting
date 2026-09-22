@@ -33,8 +33,8 @@ bool improvesLayout(const LayoutQuality& candidate,const LayoutQuality& incumben
 // Coordinate randomized restarts and retain the best validated candidate.
 static OrchestratorRunStats optimize(BackgroundRequest request,const std::function<bool()>& stop,
                                      const ImprovementCallback& onImprovement,bool timed) {
-  if(request.config.algorithm!=NestingAlgorithm::Bitmap || !stop || !onImprovement)
-    throw std::invalid_argument("Continuous search needs bitmap mode, a stop predicate and a result callback");
+  if(!stop || !onImprovement)
+    throw std::invalid_argument("Continuous search needs a stop predicate and a result callback");
   if(!std::isfinite(request.config.continuousRoundSeconds) || request.config.continuousRoundSeconds<0.01 ||
       request.config.continuousRoundSeconds>86400)
     throw std::invalid_argument("continuousRoundSeconds must be between 0.01 and 86400");

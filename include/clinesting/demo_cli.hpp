@@ -13,7 +13,6 @@ namespace clinesting {
 struct DemoCliOptions {
   int count;
   int threads;
-  NestingAlgorithm algorithm;
   double bitmapResolutionMm;
   int bitmapSearchStepPx;
   bool debugPlacement;

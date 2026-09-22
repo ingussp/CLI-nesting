@@ -178,7 +178,6 @@ with allowedAngles; and do not combine absolute angles with nonzero rotation.
 ## Three independent clearances
 
 All three distances are in millimetres, default to 0, and accept 0..1000000.
-Nonzero clearances require algorithm bitmap.
 
 | Setting | Measured between | Purpose |
 |---|---|---|
@@ -212,7 +211,6 @@ These keys are accepted in settings, config or CLI-nesting.
 
 | Field | Default | Valid values and purpose |
 |---|---|---|
-| `algorithm` | bitmap | bitmap is the current CPU/OpenCL optimizer. nfp is a reference algorithm without nonzero clearances, GPU, timed/continuous modes or part-specific angles |
 | `mode` | Inferred, normally first | first, timed, continuous; controls duration and saving behavior below |
 | `timeLimitSeconds` | 0 | 0..86400, including fractions; timed requires a positive total budget, first requires 0, continuous ignores it |
 | `continuousRoundSeconds` | 30 | 0.01..86400; budget per timed/continuous restart. Too short can spend every restart on preparation |
@@ -234,7 +232,7 @@ These keys are accepted in settings, config or CLI-nesting.
 
 ### Search strategies (trials)
 
-`trials` is integer 1..4 (default 2) and applies only to the bitmap algorithm.
+`trials` is integer 1..4 (default 2) and applies only to bitmap nesting.
 It selects how many independent nesting strategies run per search round. Each
 strategy builds a complete layout from scratch with a different tactic, and the
 best validated layout is kept. Strategies run in parallel, one worker thread per

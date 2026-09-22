@@ -1,7 +1,6 @@
 {
   "units": "mm",
   "config": {
-    "algorithm": "bitmap",
     "rotationStep": 0.1,
     "resolution": 0.5,
     "threads": 12,

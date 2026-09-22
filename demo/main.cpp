@@ -17,11 +17,6 @@ using namespace clinesting;
 
 namespace {
 
-// Return the printable name of the chosen nesting algorithm.
-const char* algorithmName(NestingAlgorithm algorithm) {
-  return algorithm == NestingAlgorithm::Bitmap ? "bitmap" : "nfp";
-}
-
 // Print phase timings for the completed run.
 void printTimingLine(const char* label, double ms) {
   std::cout << std::fixed << std::setprecision(3) << label << ": " << ms << " ms (" << (ms / 1000.0) << " s)\n";
@@ -114,7 +109,7 @@ int main(int argc, char** argv) {
   }
 
   DemoCliOptions options{
-      kDefaultDemoPartCount, defaultWorkerCount(), NestingAlgorithm::Nfp, 1.0, 1, false, std::nullopt, false};
+      kDefaultDemoPartCount, defaultWorkerCount(), 1.0, 1, false, std::nullopt, false};
   try {
     options = parseDemoCliOptions(args);
   } catch (const std::exception& ex) {
@@ -123,14 +118,13 @@ int main(int argc, char** argv) {
   }
 
   if (options.showHelp) {
-    std::cout << "Usage: clinesting_demo [--count <N>] [--threads <N>] [--algorithm nfp|bitmap]\n"
+    std::cout << "Usage: clinesting_demo [--count <N>] [--threads <N>]\n"
                  "                        [--bitmap-resolution <mm-per-pixel>] [--bitmap-step <px>]\n"
                  "                        [--debug-placement] [--output <path>] [--help]\n"
               << "  --count <N>     Number of identical star parts to generate (default "
               << kDefaultDemoPartCount << ")\n"
-              << "  --threads <N>   Worker count for independent NFP precompute (default "
+              << "  --threads <N>   Worker count for bitmap nesting (default "
               << defaultWorkerCount() << ")\n"
-              << "  --algorithm     Nesting algorithm: nfp or bitmap (default nfp)\n"
               << "  --bitmap-resolution <mm-per-pixel> Raster resolution for bitmap nesting (default 1.0)\n"
               << "  --bitmap-step <px> Bitmap candidate search step in pixels (default 1)\n"
               << "  --debug-placement Print per-part bitmap debug/progress lines\n"
@@ -143,7 +137,6 @@ int main(int argc, char** argv) {
   req.config.placementType = "box";
   req.config.rotations = 4;
   req.config.threads = options.threads;
-  req.config.algorithm = options.algorithm;
   req.config.bitmapResolutionMm = options.bitmapResolutionMm;
   req.config.bitmapSearchStepPx = options.bitmapSearchStepPx;
   req.config.debugPlacement = options.debugPlacement;
@@ -224,7 +217,7 @@ int main(int argc, char** argv) {
   }
 
   const size_t placedCount = countPlacedParts(result);
-  std::cout << "algorithm: " << algorithmName(options.algorithm) << "\n";
+  std::cout << "algorithm: bitmap\n";
   std::cout << "sheet size: " << kDemoSheetWidthMm << "x" << kDemoSheetHeightMm << " mm\n";
   std::cout << "part count: " << options.count << "\n";
   std::cout << "workers: " << options.threads << "\n";
@@ -235,25 +228,22 @@ int main(int argc, char** argv) {
   std::cout << "unplaced parts: " << result.unplaced.size() << "\n";
   std::cout << "placed sheets: " << result.placements.size() << "\n";
   std::cout << "utilisation: " << result.utilisation << "%\n";
-  if (options.algorithm == NestingAlgorithm::Bitmap) {
-    std::cout << "bitmap summary: processed=" << runStats.bitmapStats.processedParts
-              << " placed=" << runStats.bitmapStats.placedParts
-              << " unplaced=" << runStats.bitmapStats.unplacedParts
-              << " candidates=" << runStats.bitmapStats.candidatesExamined
-              << " boundary_rejects=" << runStats.bitmapStats.boundaryRejects
-              << " bitmap_collisions=" << runStats.bitmapStats.bitmapCollisions
-              << " vector_rejects=" << runStats.bitmapStats.vectorValidationRejects
-              << " accepted=" << runStats.bitmapStats.acceptedPlacements
-              << " mask_cache=" << runStats.bitmapStats.cachedMaskCount
-              << " neighbour_checks=" << runStats.bitmapStats.neighbourGeometryChecks
-              << " window_expansions=" << runStats.bitmapStats.searchWindowExpansions
-              << " fine_fallbacks=" << runStats.bitmapStats.fineFallbacks
-              << " exhausted_skips=" << runStats.bitmapStats.exhaustedShapeSkips
-              << " total_ms=" << runStats.bitmapStats.totalBitmapMs
-              << " simd=" << runStats.bitmapStats.simdBackend << "\n";
-  }
+  std::cout << "bitmap summary: processed=" << runStats.bitmapStats.processedParts
+            << " placed=" << runStats.bitmapStats.placedParts
+            << " unplaced=" << runStats.bitmapStats.unplacedParts
+            << " candidates=" << runStats.bitmapStats.candidatesExamined
+            << " boundary_rejects=" << runStats.bitmapStats.boundaryRejects
+            << " bitmap_collisions=" << runStats.bitmapStats.bitmapCollisions
+            << " vector_rejects=" << runStats.bitmapStats.vectorValidationRejects
+            << " accepted=" << runStats.bitmapStats.acceptedPlacements
+            << " mask_cache=" << runStats.bitmapStats.cachedMaskCount
+            << " neighbour_checks=" << runStats.bitmapStats.neighbourGeometryChecks
+            << " window_expansions=" << runStats.bitmapStats.searchWindowExpansions
+            << " fine_fallbacks=" << runStats.bitmapStats.fineFallbacks
+            << " exhausted_skips=" << runStats.bitmapStats.exhaustedShapeSkips
+            << " total_ms=" << runStats.bitmapStats.totalBitmapMs
+            << " simd=" << runStats.bitmapStats.simdBackend << "\n";
   printTimingLine("timing.setup", runStats.timings.setupMs);
-  printTimingLine("timing.nfp_precompute", runStats.timings.nfpPrecomputeMs);
   printTimingLine("timing.placement", runStats.timings.placementMs);
   printTimingLine("timing.bitmap", runStats.timings.bitmapMs);
   printTimingLine("timing.dxf_export", runStats.timings.dxfExportMs);

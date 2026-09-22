@@ -2,7 +2,6 @@
 
 #include "clinesting/bitmap_nesting.hpp"
 #include "clinesting/model.hpp"
-#include "clinesting/nfp_cache.hpp"
 
 #include <string>
 #include <vector>
@@ -64,7 +63,6 @@ class EventSink {
 // Store elapsed durations for orchestration and export phases.
 struct NestingTimings {
   double setupMs{0.0};
-  double nfpPrecomputeMs{0.0};
   double placementMs{0.0};
   double bitmapMs{0.0};
   double dxfExportMs{0.0};
@@ -80,19 +78,15 @@ struct OrchestratorRunStats {
   BitmapNestingStats bitmapStats;
 };
 
-// Prepare input, select the nesting backend and report results.
+// Prepare input and report bitmap nesting results.
 class BackgroundOrchestrator {
  public:
-  // Prepare input, select the nesting backend and report results.
-  explicit BackgroundOrchestrator(NfpCache cache = {});
+  BackgroundOrchestrator() = default;
   // Execute the requested nesting work and return its result.
   PlacementResult run(BackgroundRequest data, EventSink& sink);
   // Run nesting while retaining detailed timing and bitmap diagnostics.
   OrchestratorRunStats runWithStats(BackgroundRequest data, EventSink& sink,
                                   const BitmapLayoutCallback& onLayout = {});
-
- private:
-  NfpCache cache_;
 };
 
 }  // namespace clinesting
