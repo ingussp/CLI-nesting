@@ -210,8 +210,6 @@
     "continuous": false,
     "timeLimitSeconds": 0,
     "continuousRoundSeconds": 30,
-    "rotations": 4,
-    "rotationStep": 90,
     "threads": 8,
     "trials": 4,
     "bitmapResolutionMm": 1,

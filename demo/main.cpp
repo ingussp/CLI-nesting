@@ -135,12 +135,14 @@ int main(int argc, char** argv) {
   BackgroundRequest req;
   req.index = 1;
   req.config.placementType = "box";
-  req.config.rotations = 4;
   req.config.threads = options.threads;
   req.config.bitmapResolutionMm = options.bitmapResolutionMm;
   req.config.bitmapSearchStepPx = options.bitmapSearchStepPx;
   req.config.debugPlacement = options.debugPlacement;
   req.individual.placement = makeDemoStarParts(options.count);
+  for (auto& part : req.individual.placement) {
+    defaultAllowedAngles(part, 4);
+  }
   req.individual.rotation.assign(req.individual.placement.size(), 0.0);
   req.ids.reserve(req.individual.placement.size());
   req.sources.reserve(req.individual.placement.size());

@@ -35,7 +35,6 @@ add_library(clinesting
   src/geometry.cpp
   src/nfp_cache.cpp
   src/nfp.cpp
-  src/placement.cpp
   src/orchestrator.cpp
   src/json_io.cpp
 )

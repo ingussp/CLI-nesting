@@ -133,7 +133,7 @@ nesting. Unknown search, GPU and output options are errors.
 | `_ip_nesting` | Optional metadata | Copied to placed/unplaced copies and sheet results |
 | `type` | Informational | FreeCAD usually sends polygon; actual point data controls behavior |
 | `rotation` | 0 degrees | Initial part angle offset added to its uniform grid |
-| `rotations` | Global grid when omitted | Part-only integer 1..3600; a uniform grid for this part |
+| `rotations` | 4 orientations | Part-only integer 1..3600; a uniform orientation grid for this part |
 | `angle` | Unset | One absolute permitted part angle |
 | `allowedAngles` | Unset | Array of 1..3600 absolute permitted part angles |
 
@@ -168,9 +168,10 @@ reported translation. `angle: 45` permits only 45 degrees;
 duplicates are removed.
 
 Part `rotations: 1` permits only its rotation offset, default 0, matching the
-FreeCAD example. Part rotations 4 permits offset + 0,90,180,270. Without a
-part-specific rule, the global grid is used. All quantity copies share one rule;
-use separate part records for different copy orientations.
+FreeCAD example. Part `rotations: 4` permits offset + 0,90,180,270. Without a
+part-specific rule, each part defaults to four orientations (0,90,180,270). All
+quantity copies share one rule; use separate part records for different copy
+orientations.
 
 Do not combine part rotations with angle/allowedAngles; do not combine angle
 with allowedAngles; and do not combine absolute angles with nonzero rotation.
@@ -215,8 +216,6 @@ These keys are accepted in settings, config or CLI-nesting.
 | `timeLimitSeconds` | 0 | 0..86400, including fractions; timed requires a positive total budget, first requires 0, continuous ignores it |
 | `continuousRoundSeconds` | 30 | 0.01..86400; budget per timed/continuous restart. Too short can spend every restart on preparation |
 | `continuous` | false | Legacy boolean; without mode, true selects continuous. With mode it must agree: true only for continuous |
-| `rotations` | 4 | Global uniform orientation count, integer 1..3600; more angles increase work. Per-part rules override it |
-| `rotationStep` | 90 for the default grid | 0.1..360 degrees; 360/step must be an integer. 0.1 gives 3600 angles up to 359.9. If rotations is also supplied the grids must agree |
 | `threads` | Hardware logical CPU count, at least 1 | Explicit integer 1..256; CPU search worker budget. Driver/OS threads are separate and serial phases cannot use all workers |
 | `trials` | 2 | Integer 1..4: compact, then pair_rows, large_first, small_first. More strategies cost more time/memory. First mode and jobs with fewer than six copies use one |
 | `resolution` | 1 mm/pixel | Positive number up to 1000000. Finer pixels increase precision and memory; halving pixel size roughly quadruples raster area. Does not scale geometry |
@@ -374,7 +373,6 @@ CAD exchange file, not JSON with a changed extension.
 | `mode`, `continuous`, `timeLimitSeconds`, `continuousRoundSeconds` | Effective search controls |
 | `timeLimitReached`, `stopReason` | completed, time_limit or user_stop. Continuous snapshot status describes its candidate, not session completion |
 | `timingMs`, `searchIteration` | Search/orchestration duration excluding file writing; zero-based restart of the saved candidate |
-| `rotations`, `rotationStep` | Global grid; part restrictions may differ |
 | `trials`, `startedTrials`, `selectedTrial` | Strategy counts and winner diagnostics |
 | `workersUsed`, `proposalWorkersPerTrial` | Strategy workers and proposal helpers |
 | `patternPlacements`, `rejectedPositionSkips` | Pattern and failed-position cache diagnostics |
@@ -394,7 +392,6 @@ CAD exchange file, not JSON with a changed extension.
 | `--dxf path` | Enable/override DXF output |
 | `--threads N` | Override CPU budget, integer 1..256 |
 | `--trials N` | Override strategy count, integer 1..4; first still uses one |
-| `--rotations N` | Override global orientation count, integer 1..3600 |
 | `--list-gpus` | Print devices and exit, without reading input |
 | `--help`, `-h` | Print brief usage and exit |
 

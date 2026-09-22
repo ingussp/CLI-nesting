@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cmath>
 #include <optional>
 #include <string>
 #include <thread>
@@ -46,9 +47,25 @@ struct Polygon {
   std::string geometryKey;
   std::string metadataJson;
   double rotation{0.0};
-  // Absolute permitted orientations; empty keeps the global grid plus rotation.
+  // Absolute permitted orientations in degrees, normalized to [0,360).
   std::vector<double> allowedAngles;
 };
+
+// Default a part with no explicit rule to a uniform grid of `count` orientations,
+// offset by the part's own rotation. Every part carries its own rotation rule.
+inline void defaultAllowedAngles(Polygon& p, int count = 4) {
+  if (!p.allowedAngles.empty()) {
+    return;
+  }
+  p.allowedAngles.reserve(static_cast<size_t>(count));
+  for (int i = 0; i < count; ++i) {
+    double angle = std::fmod(p.rotation + 360.0 * i / count, 360.0);
+    if (angle < 0.0) {
+      angle += 360.0;
+    }
+    p.allowedAngles.push_back(angle);
+  }
+}
 
 // Represent an axis-aligned rectangle in nesting units.
 struct Bounds {
@@ -61,8 +78,6 @@ struct Bounds {
 // Collect search, clearance, precision and GPU settings.
 struct Config {
   static constexpr int maxRotations = 3600;
-  // Equally spaced angles over one full turn: 3600 means a 0.1 degree step.
-  int rotations{4};
   int threads{defaultWorkerCount()};
   double bitmapResolutionMm{1.0};
   int bitmapSearchStepPx{1};

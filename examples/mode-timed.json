@@ -1,7 +1,6 @@
 {
   "units": "mm",
   "config": {
-    "rotationStep": 0.1,
     "resolution": 0.5,
     "threads": 12,
     "trials": 4,
@@ -108,6 +107,7 @@
     {
       "id": "global-grid",
       "quantity": 6,
+      "rotations": 3600,
       "points": [
         [
           0,
