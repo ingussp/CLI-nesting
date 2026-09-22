@@ -59,8 +59,9 @@ improvement. Clear/copy the history intentionally: the next continuous start rem
 
 Input remains polygon point arrays or point objects in millimetres, with optional holes,
 IDs and quantities. A rectangular sheet can use width/height. Angles use `angle`
-for one absolute orientation or `allowedAngles` for a permitted list; otherwise
-the global rotation grid plus legacy `rotation` offset applies.
+for one absolute orientation or `allowedAngles` for a permitted list; `rotations`
+selects a uniform orientation count for one part and `rotation` adds an offset.
+Without a part rule the part defaults to four orientations (0, 90, 180, 270).
 GPU is entirely controlled by `config.gpu` (boolean or enabled/device/fallbackToCpu/batchSize
 object). `--list-gpus` is an optional device-discovery utility.
 
@@ -75,7 +76,7 @@ searchIteration, timingMs and GPU diagnostics. Timed GPU counters cover all exec
 restarts; continuous snapshots report the candidate strategy. stopReason in a
 continuous snapshot describes that candidate, not completion of the entire session.
 
-Optional legacy CLI overrides remain: --output, --dxf, --threads, --trials, --rotations.
+Optional legacy CLI overrides remain: --output, --dxf, --threads, --trials.
 Their paths resolve against the working directory. --output layout.dxf writes real
 DXF plus layout.json. Input/output collisions, including aliases of existing files,
 are rejected.

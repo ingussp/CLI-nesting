@@ -97,7 +97,7 @@ int main(int argc,char** argv) {
     namespace fs=std::filesystem;
     fs::path input="input.json";
     std::optional<fs::path> outputOverride,dxfOverride;
-    std::optional<int> threads,trials,rotations;
+    std::optional<int> threads,trials;
     for(int i=1;i<argc;++i) {
       const std::string arg=argv[i];
       if(arg=="--list-gpus") {
@@ -112,7 +112,7 @@ int main(int argc,char** argv) {
           <<"first: one complete greedy layout. timed: optimize until timeLimitSeconds expires.\n"
           <<"continuous: optimize until Ctrl+C or console close; clear results next to input and save resultN files.\n"
           <<"JSON output paths are relative to input.json. --list-gpus lists OpenCL devices.\n"
-          <<"Legacy overrides: --output result.json --dxf result.dxf --threads N --trials 1..4 --rotations 1..3600.\n";
+          <<"Legacy overrides: --output result.json --dxf result.dxf --threads N --trials 1..4.\n";
         return 0;
       }
       if(i+1>=argc) throw std::invalid_argument("Missing value for "+arg);
@@ -122,7 +122,6 @@ int main(int argc,char** argv) {
       else if(arg=="--dxf") dxfOverride=fs::u8path(value);
       else if(arg=="--threads") threads=positive(value,256,"threads");
       else if(arg=="--trials") trials=positive(value,4,"trials");
-      else if(arg=="--rotations") rotations=positive(value,clinesting::Config::maxRotations,"rotations");
       else throw std::invalid_argument("Unknown argument: "+arg);
     }
     const auto absoluteInput=fs::weakly_canonical(input);
@@ -130,7 +129,6 @@ int main(int argc,char** argv) {
     auto request=clinesting::readNestingJson(absoluteInput);
     if(threads) request.config.threads=*threads;
     if(trials) request.config.bitmapTrials=*trials;
-    if(rotations) request.config.rotations=*rotations;
     const auto resolve=[&](const std::string& value) { return base/fs::u8path(value); };
     fs::path output=outputOverride.value_or(resolve(request.output.json));
     std::optional<fs::path> dxf=dxfOverride,svg;

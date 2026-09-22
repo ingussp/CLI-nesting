@@ -728,8 +728,7 @@ PlacementResult placePartsBitmapOnSingleSheet(const Polygon& sheet,
     const std::string identity = polygonGeometryIdentity(part);
     try {
 
-    const int rotationCount = part.allowedAngles.empty() ? config.rotations : int(part.allowedAngles.size());
-    const double rotationStep = 360.0 / static_cast<double>(rotationCount);
+    const int rotationCount = int(part.allowedAngles.size());
     const std::string searchIdentity = searchPolicyKey(part);
     auto [rotationIt,newRotations]=rotationCache.try_emplace(searchIdentity);
     auto& rotationMasks=rotationIt->second;
@@ -739,7 +738,7 @@ PlacementResult placePartsBitmapOnSingleSheet(const Polygon& sheet,
       for (int r = 0; r < rotationCount; ++r) {
         deadline.check();
         const auto angleIndex=(size_t(r)+size_t(config.searchIteration%uint64_t(rotationCount)))%size_t(rotationCount);
-        const double rotation = part.allowedAngles.empty() ? part.rotation + rotationStep * static_cast<double>(angleIndex) : part.allowedAngles[angleIndex];
+        const double rotation = part.allowedAngles[angleIndex];
         const std::string key = bitmapMaskCacheKey(part,rotation);
         auto it = maskCache.find(key);
         if (it == maskCache.end()) {
@@ -1224,9 +1223,6 @@ PlacementResult placePartsBitmap(const std::vector<Polygon>& sheets,
                                  BitmapNestingStats* stats,
                                  const BitmapPartProgressCallback& onPartProgress,
                                  const BitmapLayoutCallback& onLayout) {
-  if (config.rotations < 1 || config.rotations > Config::maxRotations) {
-    throw std::invalid_argument("rotations must be an integer from 1 to 3600");
-  }
   if(config.gpuBatchSize<256 || config.gpuBatchSize>262144 || config.gpuDevice < -1)
     throw std::invalid_argument("Invalid GPU configuration");
   for(double gap:{config.spacing,config.sheetSpacing,config.holeSpacing})
@@ -1239,6 +1235,8 @@ PlacementResult placePartsBitmap(const std::vector<Polygon>& sheets,
     throw std::invalid_argument("--bitmap-step must be a positive integer");
   }
   for(const auto& part:parts) {
+    if(part.allowedAngles.empty())
+      throw std::invalid_argument("Every part requires at least one permitted orientation");
     if(part.allowedAngles.size()>Config::maxRotations)
       throw std::invalid_argument("At most 3600 allowedAngles per part are supported");
     for(double angle:part.allowedAngles)
@@ -1261,7 +1259,7 @@ PlacementResult placePartsBitmap(const std::vector<Polygon>& sheets,
   const int trialCount=parts.size()<6 ? 1 : std::clamp(config.bitmapTrials,1,4);
   const int workerCount=std::min(trialCount,normalizeWorkerCount(config.threads));
   const bool fineAngles=std::any_of(parts.begin(),parts.end(),[&](const Polygon& p) {
-    return (p.allowedAngles.empty() ? size_t(config.rotations) : p.allowedAngles.size())>64;
+    return p.allowedAngles.size()>64;
   });
   const int helpersPerTrial=fineAngles ? std::max(1,std::min(defaultWorkerCount(),normalizeWorkerCount(config.threads))/workerCount) : 1;
   // Keep one independently executed strategy's result and diagnostics.

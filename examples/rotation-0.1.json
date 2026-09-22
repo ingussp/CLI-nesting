@@ -1,7 +1,6 @@
 {
   "units": "mm",
   "config": {
-    "rotationStep": 0.1,
     "resolution": 0.1,
     "trials": 1,
     "threads": 1
@@ -15,6 +14,7 @@
     {
       "id": "fractional_angle_part",
       "quantity": 1,
+      "rotations": 3600,
       "points": [
         [
           0.0,

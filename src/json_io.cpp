@@ -105,12 +105,10 @@ Polygon polygon(const Json& obj,const std::string& name,bool sheet) {
     if(sheet) throw std::invalid_argument("Per-object rotations apply to parts, not sheets");
     if(!p.allowedAngles.empty()) throw std::invalid_argument(name+": use rotations or absolute angles, not both");
     const int count=integer(obj["rotations"],name+".rotations",1,Config::maxRotations);
-    for(int i=0;i<count;++i) {
-      double angle=std::fmod(p.rotation+360.0*i/count,360.0);
-      if(angle<0) angle+=360.0;
-      p.allowedAngles.push_back(angle);
-    }
+    defaultAllowedAngles(p,count);
   }
+  // Every part carries its own rotation rule; default to four orientations.
+  if(!sheet && p.allowedAngles.empty()) defaultAllowedAngles(p);
   // Calculate identity from the complete geometry. Never trust a user supplied
   // name or id as a geometry cache key.
   std::ostringstream identity;
@@ -130,20 +128,7 @@ void configure(const Json& j,Config& c) {
   if(!j.is_object()) throw std::invalid_argument("config must be an object");
   for(auto it=j.begin();it!=j.end();++it) {
     const auto& k=it.key(); const auto& v=it.value();
-    if(k=="rotations") c.rotations=integer(v,k,1,Config::maxRotations);
-    else if(k=="rotationStep") {
-      const double step=number(v,k);
-      if(step<360.0/Config::maxRotations || step>360.0)
-        throw std::invalid_argument("rotationStep must be between 0.1 and 360 degrees");
-      const double count=360.0/step;
-      const int rotations=static_cast<int>(std::round(count));
-      if(std::abs(count-rotations)>1e-8)
-        throw std::invalid_argument("rotationStep must divide 360 degrees into a whole number of rotations");
-      if(j.contains("rotations") && integer(j["rotations"],"rotations",1,Config::maxRotations)!=rotations)
-        throw std::invalid_argument("rotations and rotationStep describe different angle grids");
-      c.rotations=rotations;
-    }
-    else if(k=="threads") c.threads=integer(v,k,1,256);
+    if(k=="threads") c.threads=integer(v,k,1,256);
     else if(k=="trials") c.bitmapTrials=integer(v,k,1,4);
     else if(k=="mode") {
       if(v=="first") c.mode=SearchMode::First;
@@ -227,7 +212,7 @@ Json inputConfig(const Json& root) {
     const auto& block=root[field];
     if(!block.is_object()) throw std::invalid_argument(std::string(field)+" must be an object");
     for(auto it=block.begin();it!=block.end();++it) {
-      if(it.key()=="algorithm") continue;
+      if(it.key()=="algorithm" || it.key()=="rotations" || it.key()=="rotationStep") continue;
       if(std::string_view(field)=="settings" && (it.key()=="units" || legacy.contains(it.key()))) continue;
       const auto key=it.key()=="sheetSpacing" ? "partToSheet" : it.key()=="holeSpacing" ? "partToHole" : it.key();
       if(key!=it.key() && block.contains(key) && block[key]!=it.value())
@@ -320,7 +305,6 @@ BackgroundRequest readNestingJson(const std::filesystem::path& path) {
 void writeNestingJson(const std::filesystem::path& path,const BackgroundRequest& input,const OrchestratorRunStats& run) {
   const auto& r=run.placement;
   Json out={{"schemaVersion",1},{"units","mm"},{"placed",input.individual.placement.size()-r.unplaced.size()},
-    {"rotations",input.config.rotations},{"rotationStep",360.0/input.config.rotations},
     {"unplacedCount",r.unplaced.size()},{"utilisation",r.utilisation},{"timingMs",run.timings.totalMs},
     {"trials",run.bitmapStats.completedTrials},{"workersUsed",run.bitmapStats.workersUsed},
     {"proposalWorkersPerTrial",run.bitmapStats.proposalWorkersPerTrial},

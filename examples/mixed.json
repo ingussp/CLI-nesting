@@ -1,6 +1,6 @@
 {
   "units": "mm",
-  "config": { "resolution": 0.5, "rotations": 4, "threads": 4, "trials": 4 },
+  "config": { "resolution": 0.5, "threads": 4, "trials": 4 },
   "sheets": [
     { "id": "board", "quantity": 2, "points": [[0,0],[200,0],[200,150],[0,150]],
       "holes": [[[80,60],[110,60],[110,90],[80,90]]] }

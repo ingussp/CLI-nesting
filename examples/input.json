@@ -2,7 +2,6 @@
   "units": "mm",
   "config": {
     "resolution": 1.0,
-    "rotations": 4,
     "threads": 2,
     "trials": 2
   },
