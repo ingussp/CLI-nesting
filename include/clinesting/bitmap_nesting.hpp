@@ -55,6 +55,7 @@ struct BitmapNestingStats {
   size_t exhaustedShapeSkips{0};
   size_t rejectedPositionSkips{0};
   size_t patternPlacements{0};
+  size_t holePlacements{0};
   size_t completedTrials{1};
   size_t workersUsed{1};
   size_t proposalWorkersPerTrial{1};

@@ -1,0 +1,19 @@
+{
+  "units": "mm",
+  "config": {
+    "mode": "first",
+    "spacing": 3,
+    "partToHole": 3,
+    "partToSheet": 2,
+    "resolution": 1
+  },
+  "sheets": [{"id": "stock", "width": 44, "height": 44}],
+  "parts": [
+    {"id": "insert", "quantity": 1, "rotations": 1,
+     "points": [[0,0],[10,0],[10,10],[0,10]]},
+    {"id": "frame", "quantity": 1, "rotations": 1,
+     "points": [[0,0],[40,0],[40,40],[0,40]],
+     "holes": [[[10,10],[30,10],[30,30],[10,30]]]}
+  ],
+  "output": {"json": "result.json", "svg": true}
+}

@@ -95,7 +95,7 @@ struct Config {
   double curveTolerance{0.3};
   double timeRatio{1.0};
   // Independent deterministic bitmap strategies. One keeps the compact search;
-  // two additionally tries repeated pair/row patterns, concurrently when possible.
+  // two additionally tries holes-first pair/row patterns, concurrently when possible.
   int bitmapTrials{2};
   bool bitmapCacheRejects{true};
   bool bitmapPatternTrial{false}; // internal strategy selector

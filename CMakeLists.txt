@@ -54,3 +54,12 @@ add_executable(clinesting_cli demo/json_main.cpp)
 set_target_properties(clinesting_cli PROPERTIES OUTPUT_NAME clinesting)
 target_link_libraries(clinesting_cli PRIVATE clinesting)
 
+option(CLINESTING_BUILD_TESTS "Build nesting regression tests" OFF)
+if(CLINESTING_BUILD_TESTS)
+  enable_testing()
+  add_executable(clinesting_tests tests/regression.cpp)
+  target_include_directories(clinesting_tests PRIVATE src)
+  target_link_libraries(clinesting_tests PRIVATE clinesting)
+  add_test(NAME nesting_regression COMMAND clinesting_tests)
+endif()
+
