@@ -51,6 +51,16 @@ Polygon contour(const Json& input,const std::string& name) {
     if(p.points.empty() || p.points.back().x!=v.x || p.points.back().y!=v.y) p.points.push_back(v);
   }
   if(p.points.size()>1 && p.points.front().x==p.points.back().x && p.points.front().y==p.points.back().y) p.points.pop_back();
+  // Normalize an exactly repeated complete contour cycle before rasterization.
+  for(size_t period=3; period<=p.points.size()/2; ++period) {
+    if(p.points.size()%period) continue;
+    bool repeated=true;
+    for(size_t i=period;i<p.points.size();++i)
+      if(p.points[i].x!=p.points[i%period].x || p.points[i].y!=p.points[i%period].y) {
+        repeated=false; break;
+      }
+    if(repeated) { p.points.resize(period); break; }
+  }
   if(p.points.size()<3 || std::abs(polygonArea(p))<1e-9) throw std::invalid_argument(name+" has zero area");
   return p;
 }
@@ -309,6 +319,7 @@ void writeNestingJson(const std::filesystem::path& path,const BackgroundRequest&
     {"trials",run.bitmapStats.completedTrials},{"workersUsed",run.bitmapStats.workersUsed},
     {"proposalWorkersPerTrial",run.bitmapStats.proposalWorkersPerTrial},
     {"patternPlacements",run.bitmapStats.patternPlacements},{"rejectedPositionSkips",run.bitmapStats.rejectedPositionSkips},
+    {"holePlacements",run.bitmapStats.holePlacements},
     {"sheets",Json::array()},{"unplaced",Json::array()}};
   out["selectedTrial"]=run.bitmapStats.selectedTrial;
   out["clearances"]={{"spacing",input.config.spacing},{"partToSheet",input.config.sheetSpacing},

@@ -148,7 +148,10 @@ and approximate curves with points before exporting. DXF, STEP and FreeCAD
 documents are not directly imported.
 
 Each contour needs 3..20000 input points. Consecutive duplicates and an optional
-closing copy of the first point are removed. At least three points and nonzero
+closing copy of the first point are removed. An exactly repeated complete contour
+cycle is collapsed to one cycle, including for holes, so bitmap occupancy and
+vector area agree. This does not repair arbitrary self-intersections.
+At least three points and nonzero
 area must remain. Use simple, non-self-intersecting contours in boundary order.
 Holes must lie within the outline, must not overlap each other, and must leave
 positive material area. One hole level is supported. Winding direction does not
@@ -217,10 +220,10 @@ These keys are accepted in settings, config or CLI-nesting.
 | `continuousRoundSeconds` | 30 | 0.01..86400; budget per timed/continuous restart. Too short can spend every restart on preparation |
 | `continuous` | false | Legacy boolean; without mode, true selects continuous. With mode it must agree: true only for continuous |
 | `threads` | Hardware logical CPU count, at least 1 | Explicit integer 1..256; CPU search worker budget. Driver/OS threads are separate and serial phases cannot use all workers |
-| `trials` | 2 | Integer 1..4: compact, then pair_rows, large_first, small_first. More strategies cost more time/memory. First mode and jobs with fewer than six copies use one |
+| `trials` | 2 | Integer 1..4: compact, then holes_first_rows, large_first, small_first. More strategies cost more time/memory. First mode and jobs with fewer than six copies and no part holes use one |
 | `resolution` | 1 mm/pixel | Positive number up to 1000000. Finer pixels increase precision and memory; halving pixel size roughly quadruples raster area. Does not scale geometry |
 | `bitmapResolutionMm` | Alias of resolution | Same range; prefer one spelling. If both exist, resolution wins in the current parser |
-| `step` | 1 pixel | Integer 1..100000; minimum fine-search translation step. Physical step is step × resolution. Larger steps can skip feasible pockets |
+| `step` | 1 pixel | Integer 1..100000; minimum fine-search translation step. Physical step is step Ãƒâ€” resolution. Larger steps can skip feasible pockets |
 | `bitmapSearchStepPx` | Alias of step | Same range; prefer one spelling. If both exist, step wins |
 | `curveTolerance` | 0.3 mm | 0..1000000; contact-proposal contour simplification tolerance. Smaller retains more detail and costs more work. Original validation/export points remain intact; this does not import DXF curves |
 | `cacheRejects` | true | Boolean; remembers failed raster origins while occupancy grows. False reduces cache memory at the cost of repeated checks |
@@ -241,7 +244,7 @@ memory.
 | # | Strategy | What it does |
 |---|---|---|
 | 1 | `compact` | Greedy compact search in the input part order. This is the baseline. |
-| 2 | `pair_rows` | Enables repeated pair/row pattern placement: when at least six identical copies remain, it reuses a detected pair/row pattern instead of scanning every candidate position. |
+| 2 | `holes_first_rows` | Places parts with large holes first, then tries inserts inside those cavities before repeated pair/row patterns (six or more identical copies) or compact fallback. Every accepted position passes geometry and clearance checks. |
 | 3 | `large_first` | Sorts remaining parts by material area descending and places the largest first. |
 | 4 | `small_first` | Sorts remaining parts by material area ascending and places the smallest first. |
 
@@ -251,17 +254,28 @@ reported as `selectedTrial`, and each strategy's count, duration, completion and
 phase timings appear in `strategyResults`.
 
 `trials` takes effect only in `mode: "timed"` and `mode: "continuous"`.
-Mode `first` always runs the single `compact` strategy and ignores `trials`.
-Jobs with fewer than six part copies also always use one strategy, because
-`pair_rows` needs at least six identical parts and the sort-based strategies need
-shape variety to matter.
+Mode `first` runs the single `first_fast` strategy described below and ignores `trials`.
+Jobs with fewer than six part copies and no part holes also use one strategy.
+Small jobs containing part holes retain the requested alternatives: even one
+frame and one insert can depend on placing the frame first.
 
 ### First layout
 
-Mode first runs one complete greedy compact strategy across available sheets
-and exports its result. It does not wait for optimization restarts. This is not
-a guarantee that every part fits: inspect unplacedCount. Trials does not change
-the single-strategy behavior. Rotations, clearances and refinement still apply.
+Mode first runs one `first_fast` strategy across available sheets and exports
+its result without optimization restarts. It orders parts by largest hole area,
+then material area, so cavity-bearing parts are available before small inserts.
+It tries permitted orientations inside already placed holes first. Repeated
+parts then use clearance-aware row/pair patterns; compact search is the fallback.
+
+Hole bounds propose positions but never authorize a placement: the whole outline
+must fit the actual hole, and normal stock, collision and clearance checks still
+apply. Holes in the stock itself remain forbidden. `holePlacements` reports copies
+accepted by this cavity search. See [the holes-first example](examples/holes-first.json).
+
+This is a fast initial layout, not a guarantee of maximum density or that all
+copies fit: inspect `unplacedCount`. Use timed mode to compare this heuristic
+with the input-order, large-first and small-first compact strategies and keep the
+best layout. `trials` does not change the single-strategy behavior of first mode.
 
 ### Timed optimization
 
@@ -375,7 +389,7 @@ CAD exchange file, not JSON with a changed extension.
 | `timingMs`, `searchIteration` | Search/orchestration duration excluding file writing; zero-based restart of the saved candidate |
 | `trials`, `startedTrials`, `selectedTrial` | Strategy counts and winner diagnostics |
 | `workersUsed`, `proposalWorkersPerTrial` | Strategy workers and proposal helpers |
-| `patternPlacements`, `rejectedPositionSkips` | Pattern and failed-position cache diagnostics |
+| `patternPlacements`, `holePlacements`, `rejectedPositionSkips` | Pattern placements, copies inserted in part holes, and failed-position cache diagnostics |
 | `strategyResults` | Per-strategy counts, duration, completion and phase timings |
 | `gpu.requested`, `used`, `device`, `backend` | Request, actual kernel use, device and OpenCL backend |
 | `gpu.batches`, `candidates`, `fallbackReason` | GPU diagnostics. Timed totals cover restarts; continuous snapshots describe the candidate strategy |
@@ -439,3 +453,19 @@ input/output; `src/bitmap_nesting.cpp` implements raster search and scheduling;
 The OpenCL runtime is supplied by the GPU vendor's driver, not bundled. Retain
 third-party notices when distributing source/packages. Upstream headers retain
 their original comments and license notices.
+
+## Regression tests
+
+Configure with `-DCLINESTING_BUILD_TESTS=ON`, build, then run:
+
+```text
+ctest --test-dir build-release -C Release --output-on-failure
+```
+
+The tests cover repeated contours, scanline rasterization against pixel-center
+sampling, hole-first ordering, rotated and concave holes, independent clearances,
+pattern spacing, timed strategy comparison, cancellation and GPU failure policy.
+
+GPU initialization is deferred until a grid batch is needed. A job completed by
+hole/pattern placement may report `gpu.requested: true` and `gpu.used: false`;
+enabling GPU is permission to use it, not a requirement to launch unnecessary work.

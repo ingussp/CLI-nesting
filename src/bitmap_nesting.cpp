@@ -5,6 +5,7 @@
 #include "clinesting/gpu_bitmap.hpp"
 #include "parallel_loop.hpp"
 #include "search_deadline.hpp"
+#include "raster_scanline.hpp"
 #include <random>
 
 #include <algorithm>
@@ -431,15 +432,21 @@ BitmapGrid rasterizeSheetMaterial(const Polygon& sheet, double resolutionMm, Bou
   const int heightPx = rasterDimension(sheetBounds.height,resolutionMm);
   BitmapGrid material = makeBitmapGrid(widthPx, heightPx);
 
+  std::vector<double> crossings;
   for (int y = 0; y < material.heightPx; ++y) {
     deadline.check();
-    const double py = sheetBounds.y + (static_cast<double>(y) + 0.5) * resolutionMm;
-    for (int x = 0; x < material.widthPx; ++x) {
-      const double px = sheetBounds.x + (static_cast<double>(x) + 0.5) * resolutionMm;
-      if (pointInPolygonMaterial(sheet, {px, py, true})) {
-        setPixel(material, x, y);
-      }
-    }
+    const double py=sheetBounds.y+(double(y)+0.5)*resolutionMm;
+    auto draw=[&](const Polygon& contour,bool fill) {
+      detail::rasterContourRow(contour.points,py,sheetBounds.x,resolutionMm,widthPx,crossings,[&](int begin,int end) {
+        auto* row=rowBits(material,y);
+        for(int x=begin;x<end;++x) {
+          const uint64_t bit=uint64_t(1)<<(x%64);
+          if(fill) row[x/64]|=bit; else row[x/64]&=~bit;
+        }
+      });
+    };
+    draw(sheet,true);
+    for(const auto& hole:sheet.children) draw(hole,false);
   }
 
   return material;
@@ -594,8 +601,10 @@ PairPattern makePairPattern(const std::vector<const RasterMask*>& masks, int she
     const auto& bm = *masks[b.rotation];
     const int minX = std::min(a.x,b.x), minY = std::min(a.y,b.y);
     a.x -= minX; b.x -= minX; a.y -= minY; b.y -= minY;
-    const int w = std::max(a.x+am.widthPx, members==2 ? b.x+bm.widthPx : 0);
-    const int h = std::max(a.y+am.heightPx, members==2 ? b.y+bm.heightPx : 0);
+    const double maxGap=double(std::max(sheetW,sheetH))+1;
+    const int gap=static_cast<int>(std::min(maxGap,std::ceil(std::max(config.spacing,config.holeSpacing)/config.bitmapResolutionMm)));
+    const int w = std::max(a.x+am.widthPx, members==2 ? b.x+bm.widthPx : 0)+gap;
+    const int h = std::max(a.y+am.heightPx, members==2 ? b.y+bm.heightPx : 0)+gap;
     if (w<=0 || h<=0 || w>sheetW || h>sheetH) return;
     PairPattern p{a,b,w,h,sheetW/w,sheetH/h,members};
     if (p.capacity() < best.capacity()) return;
@@ -673,6 +682,9 @@ PlacementResult placePartsBitmapOnSingleSheet(const Polygon& sheet,
   std::vector<size_t> workerSkipped(parallel.size());
   std::vector<Polygon> placedAbsolute;
   std::vector<Bounds> placedBounds;
+  // Absolute contours remain stable even when the placed-part vector grows.
+  struct HolePocket { Polygon contour; Bounds bounds; };
+  std::vector<HolePocket> holePockets;
   std::vector<Placement> placements;
   SpatialIndex neighbours(std::max(config.bitmapResolutionMm,
       std::max(sheetBounds.width, sheetBounds.height) / 32.0));
@@ -692,18 +704,13 @@ PlacementResult placePartsBitmapOnSingleSheet(const Polygon& sheet,
   const size_t totalParts = parts.size();
   const int searchStep = std::max(1, config.bitmapSearchStepPx);
   std::unique_ptr<GpuBitmap> gpu;
+  bool gpuAvailable=config.gpuEnabled;
   auto gpuFailed=[&](const std::exception& e) {
     if(!config.gpuFallbackToCpu) throw std::runtime_error(e.what());
     localStats.gpuFallbackReason=e.what();
+    gpuAvailable=false;
     gpu.reset();
   };
-  if(config.gpuEnabled && !deadline.expired()) {
-    try {
-      gpu=std::make_unique<GpuBitmap>(config.gpuDevice);
-      localStats.gpuDevice=gpu->device().name;
-      gpu->setSheet(material.widthPx,material.heightPx,material.bits);
-    } catch(const std::exception& e) { gpuFailed(e); }
-  }
   std::string gpuMaskIdentity;
   size_t gpuOccupancyVersion=std::numeric_limits<size_t>::max();
   const auto bitmapStart = std::chrono::steady_clock::now();
@@ -758,6 +765,11 @@ PlacementResult placePartsBitmapOnSingleSheet(const Polygon& sheet,
 
     auto prepareGpu=[&] {
       deadline.check();
+      if(!gpu) {
+        gpu=std::make_unique<GpuBitmap>(config.gpuDevice);
+        localStats.gpuDevice=gpu->device().name;
+        gpu->setSheet(material.widthPx,material.heightPx,material.bits);
+      }
       if(gpuMaskIdentity!=searchIdentity) {
         uint64_t total=0;
         for(const auto* mask:rotationMasks) total+=mask->wordsPerRow*uint64_t(mask->heightPx);
@@ -779,7 +791,7 @@ PlacementResult placePartsBitmapOnSingleSheet(const Polygon& sheet,
     };
     auto gpuGrid=[&](uint64_t first,uint32_t count,uint32_t rows,uint32_t step,uint32_t w,uint32_t h)
         ->std::optional<std::vector<uint8_t>> {
-      if(!gpu) return std::nullopt;
+      if(!gpuAvailable) return std::nullopt;
       PhaseTimer timer{localStats.phases.gpuMs};
       try {
         prepareGpu();
@@ -874,7 +886,47 @@ PlacementResult placePartsBitmapOnSingleSheet(const Polygon& sheet,
       maxHeight = std::max(maxHeight, m->heightPx);
     }
     bool fromPattern=false;
-    if (config.bitmapPatternTrial && repetitions[searchIdentity] >= 6) {
+    if (config.bitmapPatternTrial) {
+      PhaseTimer timer{localStats.phases.searchMs};
+      // Try existing cavities before consuming more sheet area. Bounds only
+      // propose origins; exact containment and normal clearance checks decide.
+      // Visit every pocket at one angle before trying another angle. Repeated
+      // inserts can then advance to a free hole without exhausting 360 angles
+      // in each already occupied pocket.
+      for(size_t r=0;r<rotationMasks.size() && !fromPattern;++r) {
+        deadline.check();
+        for(const auto& pocket:holePockets) {
+          deadline.check();
+          const auto* m=rotationMasks[r];
+          const double gap=config.holeSpacing;
+          const double left=(pocket.bounds.x+gap-sheetBounds.x)/config.bitmapResolutionMm;
+          const double bottom=(pocket.bounds.y+gap-sheetBounds.y)/config.bitmapResolutionMm;
+          const double right=(pocket.bounds.x+pocket.bounds.width-gap-sheetBounds.x-m->rotatedBounds.width)/config.bitmapResolutionMm;
+          const double top=(pocket.bounds.y+pocket.bounds.height-gap-sheetBounds.y-m->rotatedBounds.height)/config.bitmapResolutionMm;
+          if(left>right || bottom>top) continue;
+          const int xs[]={int(std::floor((left+right)/2)),int(std::ceil(left)),int(std::floor(right))};
+          const int ys[]={int(std::floor((bottom+top)/2)),int(std::ceil(bottom)),int(std::floor(top))};
+          for(int x:xs) {
+            for(int y:ys) {
+              if(x<left || x>right || y<bottom || y>top) continue;
+              if(rejected.contains(rejected.index(x,y,r))) continue;
+              auto absolute=shiftPolygon(m->rotatedPart,
+                  {sheetBounds.x+x*config.bitmapResolutionMm-m->minX,
+                   sheetBounds.y+y*config.bitmapResolutionMm-m->minY,true});
+              if(hasMaterialOutsideSheet(absolute,pocket.contour,config)) continue;
+              if(evaluate({x,y,r})) {
+                fromPattern=true;
+                ++localStats.holePlacements;
+                break;
+              }
+            }
+            if(fromPattern) break;
+          }
+          if(fromPattern) break;
+        }
+      }
+    }
+    if (!fromPattern && config.bitmapPatternTrial && repetitions[searchIdentity] >= 6) {
       auto [patternIt,inserted] = patterns.try_emplace(searchIdentity);
       if (inserted) patternIt->second=makePairPattern(rotationMasks,material.widthPx,material.heightPx,config,contactNfpCache,pixels,deadline);
       auto& pattern=patternIt->second;
@@ -1016,7 +1068,7 @@ PlacementResult placePartsBitmapOnSingleSheet(const Polygon& sheet,
           // Coarse search is bounded to roughly 1024 grid points per window/rotation.
           const int coarse = std::max(searchStep, static_cast<int>(std::ceil(
               std::sqrt(static_cast<double>(windowW) * windowH / 1024.0))));
-          if(!gpu) {
+          if(!gpuAvailable) {
             for(int x=0;x<windowW;x+=coarse) for(int y=0;y<windowH;y+=coarse)
               for(size_t r=0;r<rotationMasks.size();++r)
                 if(x+rotationMasks[r]->widthPx<=windowW && y+rotationMasks[r]->heightPx<=windowH) evaluate({x,y,r});
@@ -1058,7 +1110,7 @@ PlacementResult placePartsBitmapOnSingleSheet(const Polygon& sheet,
           const uint64_t end = rows * columns * rotations;
           while (!bestScore && cursor < end) {
             deadline.check();
-            if(gpu) {
+            if(gpuAvailable) {
               const uint32_t count=uint32_t(std::min<uint64_t>(config.gpuBatchSize,end-cursor));
               const auto flags=gpuGrid(cursor,count,uint32_t(rows),searchStep,material.widthPx,material.heightPx);
               if(flags) {
@@ -1165,6 +1217,9 @@ PlacementResult placePartsBitmapOnSingleSheet(const Polygon& sheet,
     }
     neighbours.insert(placedBounds.back(), placedAbsolute.size());
     placedAbsolute.push_back(placedPolygon);
+    if(config.bitmapPatternTrial)
+      for(const auto& hole:placedPolygon.children)
+        holePockets.push_back({hole,getPolygonBounds(hole.points)});
     out.area += polygonMaterialArea(placedPolygon);
     ++placedCount;
     localStats.acceptedPlacements++;
@@ -1256,7 +1311,8 @@ PlacementResult placePartsBitmap(const std::vector<Polygon>& sheets,
 #endif
 
   const auto start=std::chrono::steady_clock::now();
-  const int trialCount=parts.size()<6 ? 1 : std::clamp(config.bitmapTrials,1,4);
+  const bool hasHoles=std::any_of(parts.begin(),parts.end(),[](const Polygon& p) { return !p.children.empty(); });
+  const int trialCount=parts.size()<6 && !hasHoles ? 1 : std::clamp(config.bitmapTrials,1,4);
   const int workerCount=std::min(trialCount,normalizeWorkerCount(config.threads));
   const bool fineAngles=std::any_of(parts.begin(),parts.end(),[&](const Polygon& p) {
     return p.allowedAngles.size()>64;
@@ -1278,7 +1334,7 @@ PlacementResult placePartsBitmap(const std::vector<Polygon>& sheets,
         if (i>=trialCount) break;
         const auto trialStart=std::chrono::steady_clock::now();
         auto cfg=config;
-        cfg.bitmapPatternTrial=i==1;
+        cfg.bitmapPatternTrial=i==1 || config.mode==SearchMode::First;
         auto remaining=parts;
         if(config.searchIteration>0) {
           std::mt19937_64 random(config.searchIteration*0x9e3779b97f4a7c15ULL+uint64_t(i));
@@ -1287,6 +1343,20 @@ PlacementResult placePartsBitmap(const std::vector<Polygon>& sheets,
         } else if (i>=2) std::stable_sort(remaining.begin(),remaining.end(),[&](const Polygon& a,const Polygon& b) {
           return i==2 ? polygonMaterialArea(a)>polygonMaterialArea(b) : polygonMaterialArea(a)<polygonMaterialArea(b);
         });
+        if(cfg.bitmapPatternTrial) {
+          auto largestHole=[](const Polygon& p) {
+            double area=0;
+            for(const auto& hole:p.children) area=std::max(area,std::abs(polygonArea(hole)));
+            return area;
+          };
+          // Large cavities first, then large inserts before small ones. Timed
+          // search retains independent input/large/small-order alternatives.
+          std::stable_sort(remaining.begin(),remaining.end(),[&](const Polygon& a,const Polygon& b) {
+            const double ah=largestHole(a),bh=largestHole(b);
+            if(ah!=bh) return ah>bh;
+            return polygonMaterialArea(a)>polygonMaterialArea(b);
+          });
+        }
         auto& trial=trials[size_t(i)];
         trial.started=true;
         for (const auto& sheet:sheets) {
@@ -1317,6 +1387,7 @@ PlacementResult placePartsBitmap(const std::vector<Polygon>& sheets,
           t.exhaustedShapeSkips+=s.exhaustedShapeSkips;
           t.rejectedPositionSkips+=s.rejectedPositionSkips;
           t.patternPlacements+=s.patternPlacements;
+          t.holePlacements+=s.holePlacements;
           t.occupiedBoundsArea+=s.occupiedBoundsArea;
           t.perPart.insert(t.perPart.end(),s.perPart.begin(),s.perPart.end());
         }
@@ -1374,7 +1445,7 @@ PlacementResult placePartsBitmap(const std::vector<Polygon>& sheets,
   }
   winner.stats.gpuCandidates=gpuCandidates; winner.stats.gpuBatches=gpuBatches;
   winner.stats.gpuDevice=std::move(gpuDevice); winner.stats.gpuFallbackReason=std::move(gpuFallbackReason);
-  const char* strategyNames[]={"compact","pair_rows","large_first","small_first"};
+  const char* strategyNames[]={config.mode==SearchMode::First ? "first_fast" : "compact","holes_first_rows","large_first","small_first"};
   winner.stats.selectedTrial=best;
   size_t startedTrials=0,completedTrials=0;
   for(size_t i=0;i<trials.size();++i) if(trials[i].started) {

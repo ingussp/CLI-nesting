@@ -1,0 +1,20 @@
+name: Windows regression tests
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  regression:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake --preset windows-release -DCLINESTING_BUILD_TESTS=ON
+      - name: Build
+        run: cmake --build --preset windows-release --parallel 2
+      - name: Test
+        run: ctest --test-dir build-release -C Release --output-on-failure --timeout 60

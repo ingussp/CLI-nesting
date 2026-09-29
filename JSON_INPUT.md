@@ -13,7 +13,7 @@ Run `clinesting.exe` with all settings in `input.json`, or use
 
 ## Current mode contract
 
-- `config.mode: "first"` (default): one compact strategy, then export.
+- `config.mode: "first"` (default): one fast holes-first/pattern strategy with compact fallback, then export.
 - `config.mode: "timed"`: positive `timeLimitSeconds` required. Restart searches
   until the overall deadline, retaining the best layout across every strategy and restart.
 - `config.mode: "continuous"`: restart until Ctrl+C, Ctrl+Break or console close.
@@ -72,7 +72,7 @@ still improve. Output reports `usedSheetWasteArea` and `compactWasteArea` separa
 
 Output points/holes are already transformed; do not rotate/translate them again.
 Inspect placed/unplacedCount and unplaced IDs, mode, timeLimitReached, stopReason,
-searchIteration, timingMs and GPU diagnostics. Timed GPU counters cover all executed
+searchIteration, timingMs, holePlacements and GPU diagnostics. Timed GPU counters cover all executed
 restarts; continuous snapshots report the candidate strategy. stopReason in a
 continuous snapshot describes that candidate, not completion of the entire session.
 

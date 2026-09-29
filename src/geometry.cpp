@@ -280,6 +280,11 @@ bool hasNonZeroClipperArea(const Paths64& paths) {
 }
 
 bool hasMaterialOverlap(const Polygon& A, const Polygon& B, const Config& config) {
+  const auto ab=getPolygonBounds(A.points), bb=getPolygonBounds(B.points);
+  const double eps=2.0/config.clipperScale;
+  if(ab.x+ab.width<bb.x-eps || bb.x+bb.width<ab.x-eps ||
+     ab.y+ab.height<bb.y-eps || bb.y+bb.height<ab.y-eps) return false;
+
   Paths64 inter = Intersect(Paths64{outerPathToClipperCoordinates(A, config)},
                             Paths64{outerPathToClipperCoordinates(B, config)}, FillRule::NonZero);
   if (inter.empty()) {
@@ -349,6 +354,11 @@ double segmentDistanceSquared(const Point& p,const Point& q,const Point& r,const
 // Reject contour pairs whose Euclidean edge separation is below the margin.
 bool contoursTooClose(const Polygon& a,const Polygon& b,double margin) {
   if(margin<=0) return false;
+  const auto ab=getPolygonBounds(a.points), bb=getPolygonBounds(b.points);
+  const double boundX=std::max({ab.x-bb.x-bb.width,bb.x-ab.x-ab.width,0.0});
+  const double boundY=std::max({ab.y-bb.y-bb.height,bb.y-ab.y-ab.height,0.0});
+  if(boundX*boundX+boundY*boundY>=margin*margin) return false;
+
   const double squared=std::max(0.0,margin-std::min(1e-7,margin*1e-9));
   const double threshold=squared*squared;
   for(size_t i=0;i<a.points.size();++i) {
