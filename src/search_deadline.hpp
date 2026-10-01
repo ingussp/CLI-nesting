@@ -3,6 +3,7 @@
 #include <cmath>
 #include <stdexcept>
 #include <functional>
+#include <mutex>
 
 namespace clinesting {
 // Signal cooperative interruption of a search phase.
@@ -20,7 +21,11 @@ class SearchDeadline {
         std::chrono::duration<double>(seconds));
   }
   // Check whether the caller requested a cooperative stop.
-  bool cancelled() const { return stop_ && stop_(); }
+  bool cancelled() const {
+    if(!stop_) return false;
+    std::lock_guard lock(stopMutex_);
+    return stop_();
+  }
   // Check whether the configured time budget has elapsed.
   bool timedOut() const { return enabled_ && std::chrono::steady_clock::now()>=end_; }
   // Check either user cancellation or the elapsed time limit.
@@ -30,6 +35,7 @@ class SearchDeadline {
  private:
   bool enabled_;
   std::function<bool()> stop_;
+  mutable std::mutex stopMutex_;
   std::chrono::steady_clock::time_point end_;
 };
 }

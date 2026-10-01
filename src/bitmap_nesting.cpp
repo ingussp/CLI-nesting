@@ -132,6 +132,7 @@ struct Candidate {
   size_t rotation;
   int64_t area{0};
   int extent{0};
+  const Polygon* pocket{nullptr};
 };
 
 // Failed origins remain invalid while occupancy only grows. Each strategy/sheet
@@ -364,10 +365,12 @@ RasterMask rasterizePartMask(const Polygon& part, double rotationDeg, double res
 
 // Keep the exact rotated geometry for every angle, but build pixel data only
 // when a candidate actually needs collision testing.
-void rasterizeMaskPixels(const RasterMask& mask, double resolutionMm, const SearchDeadline* deadline) {
+void rasterizeMaskPixels(const RasterMask& mask, double resolutionMm, const SearchDeadline* deadline, ParallelLoop& parallel) {
   mask.bits.assign(mask.wordsPerRow * static_cast<size_t>(mask.heightPx), 0ULL);
 
-  for (int y = 0; y < mask.heightPx; ++y) {
+  parallel.run(size_t(mask.heightPx),[&](size_t begin,size_t end,size_t) {
+  for (int y = int(begin); y < int(end); ++y) {
+    if(deadline) deadline->check();
     const double py = mask.minY + (static_cast<double>(y) + 0.5) * resolutionMm;
     for (int x = 0; x < mask.widthPx; ++x) {
       const double px = mask.minX + (static_cast<double>(x) + 0.5) * resolutionMm;
@@ -377,6 +380,8 @@ void rasterizeMaskPixels(const RasterMask& mask, double resolutionMm, const Sear
       }
     }
   }
+
+  });
 
   // Dense rows reject collisions early; empty rows cannot collide or be outside
   // the material and can be omitted. Storage/commit order remains unchanged.
@@ -398,7 +403,7 @@ void rasterizeMaskPixels(const RasterMask& mask, double resolutionMm, const Sear
 class RasterPixels {
  public:
   // Initialize the bounded lazy raster cache.
-  explicit RasterPixels(double resolution,const SearchDeadline& deadline) : resolution_(resolution),deadline_(deadline) {}
+  explicit RasterPixels(double resolution,const SearchDeadline& deadline,ParallelLoop& parallel) : resolution_(resolution),deadline_(deadline),parallel_(parallel) {}
   // Materialize a mask while respecting cache and cancellation limits.
   void ensure(const RasterMask& mask,bool cancellable=true) {
     if(cancellable) deadline_.check();
@@ -413,7 +418,7 @@ class RasterPixels {
       std::vector<uint64_t>().swap(old->bits);
       std::vector<int>().swap(old->collisionRows);
     }
-    try { rasterizeMaskPixels(mask, resolution_,cancellable ? &deadline_ : nullptr); }
+    try { rasterizeMaskPixels(mask, resolution_,cancellable ? &deadline_ : nullptr,parallel_); }
     catch(const SearchTimeExpired&) { mask.bits.clear(); mask.collisionRows.clear(); throw; }
     bytes_ += mask.bits.capacity() * sizeof(uint64_t) + mask.collisionRows.capacity() * sizeof(int);
     resident_.push_back(&mask);
@@ -421,19 +426,21 @@ class RasterPixels {
  private:
   double resolution_;
   const SearchDeadline& deadline_;
+  ParallelLoop& parallel_;
   size_t bytes_{0};
   std::deque<const RasterMask*> resident_;
 };
 
 // Convert usable stock, excluding holes, into a material bitmap.
-BitmapGrid rasterizeSheetMaterial(const Polygon& sheet, double resolutionMm, Bounds& sheetBounds,const SearchDeadline& deadline) {
+BitmapGrid rasterizeSheetMaterial(const Polygon& sheet, double resolutionMm, Bounds& sheetBounds,const SearchDeadline& deadline,ParallelLoop& parallel) {
   sheetBounds = getPolygonBounds(sheet.points);
   const int widthPx = rasterDimension(sheetBounds.width,resolutionMm);
   const int heightPx = rasterDimension(sheetBounds.height,resolutionMm);
   BitmapGrid material = makeBitmapGrid(widthPx, heightPx);
 
+  parallel.run(size_t(material.heightPx),[&](size_t begin,size_t end,size_t) {
   std::vector<double> crossings;
-  for (int y = 0; y < material.heightPx; ++y) {
+  for (int y = int(begin); y < int(end); ++y) {
     deadline.check();
     const double py=sheetBounds.y+(double(y)+0.5)*resolutionMm;
     auto draw=[&](const Polygon& contour,bool fill) {
@@ -449,6 +456,7 @@ BitmapGrid rasterizeSheetMaterial(const Polygon& sheet, double resolutionMm, Bou
     for(const auto& hole:sheet.children) draw(hole,false);
   }
 
+  });
   return material;
 }
 
@@ -577,6 +585,9 @@ struct PairPattern {
   Candidate a{0,0,0}, b{0,0,0};
   int width{0}, height{0}, columns{0}, rows{0}, members{1};
   uint64_t cursor{0};
+  std::vector<Candidate> pending;
+  std::vector<uint8_t> flags;
+  size_t pendingCursor{0};
   // Return the number of positions available in a repeated pattern.
   uint64_t capacity() const { return uint64_t(columns) * rows * members; }
   // Advance to the next available cached origin or pattern position.
@@ -662,7 +673,7 @@ PlacementResult placePartsBitmapOnSingleSheet(const Polygon& sheet,
   BitmapNestingStats localStats;
   const auto preparationStart=std::chrono::steady_clock::now();
   BitmapGrid material;
-  try { material=rasterizeSheetMaterial(sheet, config.bitmapResolutionMm, sheetBounds,deadline); }
+  try { material=rasterizeSheetMaterial(sheet, config.bitmapResolutionMm, sheetBounds,deadline,parallel); }
   catch(const SearchTimeExpired&) {
     out.unplaced=parts;
     localStats.timeLimitReached=true;
@@ -675,7 +686,7 @@ PlacementResult placePartsBitmapOnSingleSheet(const Polygon& sheet,
   // even when the lookup table grows to thousands of requested angles.
   std::unordered_map<std::string, std::unique_ptr<RasterMask>> maskCache;
   std::unordered_map<std::string, std::vector<const RasterMask*>> rotationCache;
-  RasterPixels pixels(config.bitmapResolutionMm,deadline);
+  RasterPixels pixels(config.bitmapResolutionMm,deadline,parallel);
   NfpCache contactNfpCache;
   std::vector<std::unordered_map<NfpKey, std::vector<Point>, NfpKeyHash>> workerContacts(parallel.size());
   std::vector<std::vector<Candidate>> workerCandidates(parallel.size());
@@ -685,6 +696,7 @@ PlacementResult placePartsBitmapOnSingleSheet(const Polygon& sheet,
   // Absolute contours remain stable even when the placed-part vector grows.
   struct HolePocket { Polygon contour; Bounds bounds; };
   std::vector<HolePocket> holePockets;
+  std::unordered_map<std::string,size_t> exhaustedPockets;
   std::vector<Placement> placements;
   SpatialIndex neighbours(std::max(config.bitmapResolutionMm,
       std::max(sheetBounds.width, sheetBounds.height) / 32.0));
@@ -801,6 +813,20 @@ PlacementResult placePartsBitmapOnSingleSheet(const Polygon& sheet,
         return flags;
       } catch(const std::exception& e) { gpuFailed(e); return std::nullopt; }
     };
+    auto gpuCandidates=[&](std::span<const Candidate> candidates)
+        ->std::optional<std::vector<uint8_t>> {
+      if(!gpuAvailable || candidates.empty()) return std::nullopt;
+      PhaseTimer timer{localStats.phases.gpuMs};
+      try {
+        prepareGpu();
+        std::vector<GpuCandidate> input; input.reserve(candidates.size());
+        for(const auto& c:candidates) input.push_back({c.x,c.y,uint32_t(c.rotation)});
+        auto flags=gpu->filter(input);
+        ++localStats.gpuBatches; localStats.gpuCandidates+=input.size();
+        deadline.check();
+        return flags;
+      } catch(const std::exception& e) { gpuFailed(e); return std::nullopt; }
+    };
     auto& rejected = rejectedOrigins[searchIdentity];
     if (rejected.rows == 0 && globalMaxOriginX >= 0 && globalMaxOriginY >= 0) {
       rejected.rows = uint64_t(globalMaxOriginY) + 1;
@@ -821,64 +847,101 @@ PlacementResult placePartsBitmapOnSingleSheet(const Polygon& sheet,
       return {int64_t(w) * h, std::max(w, h), c.x, c.y, c.rotation};
     };
     std::optional<Score> bestScore;
-    auto evaluate = [&](const Candidate& c) {
-      if((partCandidatesExamined & 255)==0) deadline.check();
-      const int x = c.x, y = c.y;
-      const RasterMask* mask = rotationMasks[c.rotation];
-      ++partCandidatesExamined;
-      if (x < 0 || y < 0 || x > material.widthPx - mask->widthPx ||
-          y > material.heightPx - mask->heightPx) {
-        ++partBoundaryRejects;
-        return false;
+    // Workers read one immutable occupancy snapshot. Cache writes, ranking and
+    // placement commits stay on the caller, preserving serial candidate order.
+    auto evaluateBatch = [&](std::span<const Candidate> candidates,bool first,
+                             std::span<const uint8_t> cachedFlags=std::span<const uint8_t>{},
+                             bool freshFlags=false,bool allowGpu=true,bool select=true) -> std::optional<size_t> {
+      deadline.check();
+      enum class State { Pending, Skip, Boundary, Cached, Bitmap, Geometry, Pocket, Valid };
+      struct Check { State state{State::Pending}; Polygon absolute; Bounds bounds; size_t neighbours{0}; };
+      std::vector<Check> checks(candidates.size());
+      std::vector<Candidate> eligible;
+      std::vector<size_t> indices;
+      for(size_t i=0;i<candidates.size();++i) {
+        const auto& c=candidates[i]; const auto* m=rotationMasks[c.rotation];
+        auto& check=checks[i];
+        if(c.x<0 || c.y<0 || c.x>material.widthPx-m->widthPx || c.y>material.heightPx-m->heightPx)
+          check.state=State::Boundary;
+        else if(bestScore && score(c)>=*bestScore) check.state=State::Skip;
+        else if(rejected.contains(rejected.index(c.x,c.y,c.rotation))) check.state=State::Cached;
+        else if(!cachedFlags.empty() && !cachedFlags[i]) check.state=State::Bitmap;
+        else { eligible.push_back(c); indices.push_back(i); }
       }
-      const Score candidateScore = score(c);
-      if (bestScore && candidateScore >= *bestScore) return false;
-      const uint64_t origin = rejected.index(x, y, c.rotation);
-      if (rejected.contains(origin)) {
-        ++localStats.rejectedPositionSkips;
-        return false;
-      }
-      pixels.ensure(*mask);
-      if (!maskFits(occupancy, material, *mask, x, y, useAvx2)) {
-        rejected.insert(origin);
-        ++partBitmapCollisions;
-        return false;
-      }
-      const double shiftX = sheetBounds.x + x * config.bitmapResolutionMm - mask->minX;
-      const double shiftY = sheetBounds.y + y * config.bitmapResolutionMm - mask->minY;
-      const Bounds absoluteBounds{sheetBounds.x + x * config.bitmapResolutionMm,
-                                  sheetBounds.y + y * config.bitmapResolutionMm,
-                                  mask->rotatedBounds.width, mask->rotatedBounds.height};
-      if (config.bitmapValidateGeometry || config.spacing>0 || config.sheetSpacing>0 || config.holeSpacing>0) {
-        Polygon absolute = shiftPolygon(mask->rotatedPart, {shiftX, shiftY, true});
-        if (violatesSheetClearance(absolute, sheet, config)) {
-          rejected.insert(origin);
-          ++partVectorValidationRejects;
-          return false;
+      auto flags=allowGpu ? gpuCandidates(eligible) : std::optional<std::vector<uint8_t>>{};
+      if(flags) {
+        for(size_t j=0;j<indices.size();++j) if(!(*flags)[j]) checks[indices[j]].state=State::Bitmap;
+      } else if(!freshFlags || cachedFlags.empty()) {
+        // Pin one rotation at a time: lazy-cache eviction must never race a
+        // reader or invalidate a mask while another worker tests its pixels.
+        std::vector<std::vector<size_t>> byRotation(rotationMasks.size());
+        for(size_t i:indices) byRotation[candidates[i].rotation].push_back(i);
+        for(size_t r=0;r<byRotation.size();++r) if(!byRotation[r].empty()) {
+          const auto* mask=rotationMasks[r]; pixels.ensure(*mask);
+          const auto& group=byRotation[r];
+          parallel.run(group.size(),[&](size_t begin,size_t end,size_t) {
+            for(size_t j=begin;j<end;++j) {
+              deadline.check(); const size_t i=group[j]; const auto& c=candidates[i];
+              if(!maskFits(occupancy,material,*mask,c.x,c.y,useAvx2)) checks[i].state=State::Bitmap;
+            }
+          });
         }
-        const double gap=std::min(std::max(config.spacing,config.holeSpacing),std::max(sheetBounds.width,sheetBounds.height));
-        const Bounds expanded{absoluteBounds.x-gap,absoluteBounds.y-gap,
-                              absoluteBounds.width+2*gap,absoluteBounds.height+2*gap};
-        for (size_t id : neighbours.query(expanded)) {
-          if (!boundsIntersect(expanded, placedBounds[id])) continue;
-          ++localStats.neighbourGeometryChecks;
-          if (violatesPartClearance(absolute, placedAbsolute[id], config)) {
-            rejected.insert(origin);
-            ++partVectorValidationRejects;
-            return false;
+      }
+      std::vector<size_t> exact;
+      for(size_t i:indices) if(checks[i].state==State::Pending) exact.push_back(i);
+      std::vector<uint8_t> exactWorkers(parallel.size(),0);
+      bool interrupted=false;
+      try { parallel.run(exact.size(),[&](size_t begin,size_t end,size_t slot) {
+        for(size_t j=begin;j<end;++j) {
+          deadline.check(); const size_t i=exact[j]; const auto& c=candidates[i]; auto& check=checks[i];
+          exactWorkers[slot]=1;
+          const auto* mask=rotationMasks[c.rotation];
+          const double shiftX=sheetBounds.x+c.x*config.bitmapResolutionMm-mask->minX;
+          const double shiftY=sheetBounds.y+c.y*config.bitmapResolutionMm-mask->minY;
+          check.bounds={sheetBounds.x+c.x*config.bitmapResolutionMm,sheetBounds.y+c.y*config.bitmapResolutionMm,
+                        mask->rotatedBounds.width,mask->rotatedBounds.height};
+          check.absolute=shiftPolygon(mask->rotatedPart,{shiftX,shiftY,true});
+          if(c.pocket && hasMaterialOutsideSheet(check.absolute,*c.pocket,config)) {
+            check.state=State::Pocket; continue;
           }
+          if(config.bitmapValidateGeometry || config.spacing>0 || config.sheetSpacing>0 || config.holeSpacing>0) {
+            if(violatesSheetClearance(check.absolute,sheet,config)) { check.state=State::Geometry; continue; }
+            const double gap=std::min(std::max(config.spacing,config.holeSpacing),std::max(sheetBounds.width,sheetBounds.height));
+            const Bounds expanded{check.bounds.x-gap,check.bounds.y-gap,check.bounds.width+2*gap,check.bounds.height+2*gap};
+            for(size_t id:neighbours.query(expanded)) {
+              if(!boundsIntersect(expanded,placedBounds[id])) continue;
+              ++check.neighbours;
+              if(violatesPartClearance(check.absolute,placedAbsolute[id],config)) { check.state=State::Geometry; break; }
+            }
+          }
+          if(check.state==State::Pending) check.state=State::Valid;
         }
-        acceptedAbsolute = std::move(absolute);
-        acceptedBounds = absoluteBounds;
+      }); } catch(const SearchTimeExpired&) { interrupted=true; }
+      localStats.candidateWorkersUsed=std::max(localStats.candidateWorkersUsed,
+          size_t(std::count(exactWorkers.begin(),exactWorkers.end(),uint8_t(1))));
+      std::optional<size_t> selected;
+      for(size_t i=0;i<candidates.size();++i) {
+        const auto& c=candidates[i]; auto& check=checks[i];
+        if(check.state==State::Pending) continue;
+        ++partCandidatesExamined; localStats.neighbourGeometryChecks+=check.neighbours;
+        if(check.state==State::Boundary) ++partBoundaryRejects;
+        else if(check.state==State::Cached) ++localStats.rejectedPositionSkips;
+        else if(check.state==State::Bitmap || check.state==State::Geometry) {
+          rejected.insert(rejected.index(c.x,c.y,c.rotation));
+          if(check.state==State::Bitmap) ++partBitmapCollisions; else ++partVectorValidationRejects;
+        } else if(select && check.state==State::Valid && !(first && selected) && (!bestScore || score(c)<*bestScore)) {
+          const auto* mask=rotationMasks[c.rotation];
+          bestScore=score(c); selected=i;
+          acceptedX=c.x; acceptedY=c.y; acceptedMask=mask;
+          acceptedAbsolute=std::move(check.absolute); acceptedBounds=check.bounds;
+          acceptedPlacement=Placement{sheetBounds.x+c.x*config.bitmapResolutionMm-mask->minX,
+              sheetBounds.y+c.y*config.bitmapResolutionMm-mask->minY,part.id,mask->rotationDeg,part.source,part.filename,0.0,{}};
+        }
       }
-      bestScore = candidateScore;
-      acceptedPlacement = Placement{shiftX, shiftY, part.id, mask->rotationDeg,
-                                    part.source, part.filename, 0.0, {}};
-      acceptedMask = mask;
-      acceptedX = x;
-      acceptedY = y;
-      return true;
+      if(interrupted) throw SearchTimeExpired{};
+      return selected;
     };
+    const size_t validationBatch=std::min<size_t>(config.gpuBatchSize,64);
 
     int maxWidth = 1, maxHeight = 1;
     for (const auto* m : rotationMasks) {
@@ -886,16 +949,23 @@ PlacementResult placePartsBitmapOnSingleSheet(const Polygon& sheet,
       maxHeight = std::max(maxHeight, m->heightPx);
     }
     bool fromPattern=false;
-    if (config.bitmapPatternTrial) {
+    if (config.bitmapPatternTrial && exhaustedPockets[searchIdentity]<holePockets.size()) {
       PhaseTimer timer{localStats.phases.searchMs};
       // Try existing cavities before consuming more sheet area. Bounds only
       // propose origins; exact containment and normal clearance checks decide.
       // Visit every pocket at one angle before trying another angle. Repeated
       // inserts can then advance to a free hole without exhausting 360 angles
       // in each already occupied pocket.
+      std::vector<Candidate> pockets;
+      auto flushPockets=[&] {
+        if(pockets.empty()) return;
+        if(evaluateBatch(pockets,true)) { fromPattern=true; ++localStats.holePlacements; }
+        pockets.clear();
+      };
       for(size_t r=0;r<rotationMasks.size() && !fromPattern;++r) {
         deadline.check();
-        for(const auto& pocket:holePockets) {
+        for(size_t h=exhaustedPockets[searchIdentity];h<holePockets.size();++h) {
+          const auto& pocket=holePockets[h];
           deadline.check();
           const auto* m=rotationMasks[r];
           const double gap=config.holeSpacing;
@@ -910,34 +980,53 @@ PlacementResult placePartsBitmapOnSingleSheet(const Polygon& sheet,
             for(int y:ys) {
               if(x<left || x>right || y<bottom || y>top) continue;
               if(rejected.contains(rejected.index(x,y,r))) continue;
-              auto absolute=shiftPolygon(m->rotatedPart,
-                  {sheetBounds.x+x*config.bitmapResolutionMm-m->minX,
-                   sheetBounds.y+y*config.bitmapResolutionMm-m->minY,true});
-              if(hasMaterialOutsideSheet(absolute,pocket.contour,config)) continue;
-              if(evaluate({x,y,r})) {
-                fromPattern=true;
-                ++localStats.holePlacements;
-                break;
-              }
+              Candidate c{x,y,r}; c.pocket=&pocket.contour; pockets.push_back(c);
+              if(pockets.size()==validationBatch) flushPockets();
+              if(fromPattern) break;
             }
             if(fromPattern) break;
           }
           if(fromPattern) break;
         }
       }
+      if(!fromPattern) flushPockets();
+      // Every origin/angle in these cavities has failed for this exact shape
+      // and angle policy. Occupancy only grows, so only newly added cavities
+      // can become useful to a later identical copy.
+      if(!fromPattern) exhaustedPockets[searchIdentity]=holePockets.size();
     }
     if (!fromPattern && config.bitmapPatternTrial && repetitions[searchIdentity] >= 6) {
       auto [patternIt,inserted] = patterns.try_emplace(searchIdentity);
       if (inserted) patternIt->second=makePairPattern(rotationMasks,material.widthPx,material.heightPx,config,contactNfpCache,pixels,deadline);
       auto& pattern=patternIt->second;
-      while (pattern.cursor < pattern.capacity()) {
-        if (evaluate(pattern.next())) { fromPattern=true; ++localStats.patternPlacements; break; }
+      while(!fromPattern) {
+        if(pattern.pendingCursor==pattern.pending.size()) {
+          pattern.pending.clear(); pattern.pendingCursor=0;
+          while(pattern.cursor<pattern.capacity() && pattern.pending.size()<validationBatch) pattern.pending.push_back(pattern.next());
+          if(pattern.pending.empty()) break;
+          pattern.flags=gpuCandidates(pattern.pending).value_or(std::vector<uint8_t>{});
+          // Prevalidate lookahead once across CPU workers. Permanent failures
+          // enter the rejection cache; positives get a fresh check at commit.
+          evaluateBatch(pattern.pending,false,pattern.flags,!pattern.flags.empty(),false,false);
+        }
+        // GPU negatives remain invalid as occupancy grows. Cached positives
+        // are checked again on CPU against all placements committed since upload.
+        const auto pending=std::span<const Candidate>(pattern.pending).subspan(pattern.pendingCursor);
+        const auto batch=pending.first(1);
+        const auto flags=pattern.flags.empty() ? std::span<const uint8_t>{}
+            : std::span<const uint8_t>(pattern.flags).subspan(pattern.pendingCursor,batch.size());
+        const auto found=evaluateBatch(batch,true,flags,false,false);
+        pattern.pendingCursor+=found ? *found+1 : batch.size();
+        if(found) { fromPattern=true; ++localStats.patternPlacements; }
       }
     }
     std::vector<Candidate> candidates;
     if (!fromPattern && !exhausted.contains(searchIdentity)) {
       PhaseTimer proposalTimer{localStats.phases.proposalsMs};
-      parallel.run(rotationMasks.size(),[&](size_t begin,size_t end,size_t slot) {
+      const size_t tiles=std::min(parallel.size(),std::max<size_t>(1,rasterPlacements.size()));
+      for(auto& batch:workerCandidates) batch.clear();
+      std::fill(workerSkipped.begin(),workerSkipped.end(),0);
+      parallel.run(rotationMasks.size()*tiles,[&](size_t begin,size_t end,size_t slot) {
       auto& localCandidates=workerCandidates[slot];
       localCandidates.clear();
       auto& pairContacts=workerContacts[slot];
@@ -962,15 +1051,17 @@ PlacementResult placePartsBitmapOnSingleSheet(const Polygon& sheet,
       const size_t contactStride = std::max<size_t>(1, (rotationMasks.size() + 63) / 64);
       const size_t frontierStart = rotationMasks.size() > 64 && rasterPlacements.size() > 24
           ? rasterPlacements.size() - 24 : 0;
-      for (size_t r = begin; r < end; ++r) {
+      for (size_t job = begin; job < end; ++job) {
+        const size_t r=job/tiles,tile=job%tiles;
         deadline.check();
         const size_t first=localCandidates.size();
         const auto* m = rotationMasks[r];
         const double maxGap=double(std::max(material.widthPx,material.heightPx))+1;
         const int edgeGap=static_cast<int>(std::min(maxGap,std::ceil(config.sheetSpacing/config.bitmapResolutionMm)));
         const int partGap=static_cast<int>(std::min(maxGap,std::ceil(config.spacing/config.bitmapResolutionMm)));
-        propose(edgeGap, edgeGap, r);
-        for (size_t i = frontierStart; i < rasterPlacements.size(); ++i) {
+        if(tile==0) propose(edgeGap, edgeGap, r);
+        const size_t frontierCount=rasterPlacements.size()-frontierStart;
+        for (size_t i = frontierStart+frontierCount*tile/tiles; i < frontierStart+frontierCount*(tile+1)/tiles; ++i) {
           const auto& q = rasterPlacements[i];
           const int right = q.x + q.mask->widthPx, top = q.y + q.mask->heightPx;
           // Bounding-box contacts cheaply grow rows and columns around the occupied region.
@@ -1009,7 +1100,7 @@ PlacementResult placePartsBitmapOnSingleSheet(const Polygon& sheet,
           }
         }
         auto it = repeated.find(identity);
-        if (it != repeated.end() && it->second.size() >= 2) {
+        if (tile==0 && it != repeated.end() && it->second.size() >= 2) {
           const auto& copies = it->second;
           const auto& last = copies.back();
           // Reuse successful relative pair translations; each proposal is revalidated.
@@ -1037,6 +1128,14 @@ PlacementResult placePartsBitmapOnSingleSheet(const Polygon& sheet,
         candidates.insert(candidates.end(),workerCandidates[slot].begin(),workerCandidates[slot].end());
         localStats.rejectedPositionSkips+=workerSkipped[slot];
       }
+      // Tiles may propose the same contact. Remove duplicates before the
+      // ranked shortlist so its contents do not depend on the thread count.
+      std::sort(candidates.begin(),candidates.end(),[](const Candidate& a,const Candidate& b) {
+        return std::tie(a.rotation,a.x,a.y)<std::tie(b.rotation,b.x,b.y);
+      });
+      candidates.erase(std::unique(candidates.begin(),candidates.end(),[](const Candidate& a,const Candidate& b) {
+        return a.rotation==b.rotation && a.x==b.x && a.y==b.y;
+      }),candidates.end());
     }
     if (!fromPattern && !exhausted.contains(searchIdentity)) {
       auto rank = [](const Candidate& a, const Candidate& b) {
@@ -1060,35 +1159,34 @@ PlacementResult placePartsBitmapOnSingleSheet(const Polygon& sheet,
         const auto limit = std::min<size_t>(8192, inWindow.size());
         if(limit<inWindow.size()) std::nth_element(inWindow.begin(),inWindow.begin()+limit,inWindow.end(),rank);
         std::sort(inWindow.begin(),inWindow.begin()+limit,rank);
-        for (size_t i=0; i<limit; ++i) {
-          evaluate(inWindow[i]);
-          if (bestScore) break;
-        }
+        for(size_t i=0;i<limit && !bestScore;i+=validationBatch)
+          evaluateBatch(std::span<const Candidate>(inWindow).subspan(i,std::min(validationBatch,limit-i)),true);
         if (!bestScore) {
-          // Coarse search is bounded to roughly 1024 grid points per window/rotation.
+          // GPU and CPU share the same deterministic grid order and validation.
           const int coarse = std::max(searchStep, static_cast<int>(std::ceil(
               std::sqrt(static_cast<double>(windowW) * windowH / 1024.0))));
-          if(!gpuAvailable) {
-            for(int x=0;x<windowW;x+=coarse) for(int y=0;y<windowH;y+=coarse)
-              for(size_t r=0;r<rotationMasks.size();++r)
-                if(x+rotationMasks[r]->widthPx<=windowW && y+rotationMasks[r]->heightPx<=windowH) evaluate({x,y,r});
-          } else {
           const uint64_t rows=(uint64_t(windowH)+coarse-1)/coarse;
           const uint64_t end=((uint64_t(windowW)+coarse-1)/coarse)*rows*rotationMasks.size();
           for(uint64_t first=0;first<end;) {
             deadline.check();
             const uint32_t count=uint32_t(std::min<uint64_t>(config.gpuBatchSize,end-first));
             const auto flags=gpuGrid(first,count,uint32_t(rows),coarse,windowW,windowH);
-            for(uint32_t i=0;i<count;++i) {
-              if(flags && !(*flags)[i]) continue;
-              const uint64_t p=first+i;
-              const size_t r=size_t(p%rotationMasks.size());
-              const int x=int(p/rotationMasks.size()/rows)*coarse;
-              const int y=int((p/rotationMasks.size())%rows)*coarse;
-              if(x+rotationMasks[r]->widthPx<=windowW && y+rotationMasks[r]->heightPx<=windowH) evaluate({x,y,r});
+            for(size_t offset=0;offset<count;offset+=validationBatch) {
+              const size_t n=std::min(validationBatch,size_t(count)-offset);
+              std::vector<Candidate> batch; batch.reserve(n);
+              std::vector<uint8_t> allowed; allowed.reserve(n);
+              for(size_t i=0;i<n;++i) {
+                const uint64_t p=first+offset+i;
+                const size_t r=size_t(p%rotationMasks.size());
+                const int x=int(p/rotationMasks.size()/rows)*coarse;
+                const int y=int((p/rotationMasks.size())%rows)*coarse;
+                if(x+rotationMasks[r]->widthPx>windowW || y+rotationMasks[r]->heightPx>windowH) continue;
+                batch.push_back({x,y,r});
+                allowed.push_back(!flags || (*flags)[offset+i]);
+              }
+              evaluateBatch(batch,false,allowed,bool(flags),false);
             }
             first+=count;
-          }
           }
         }
         if (bestScore || (windowW == material.widthPx && windowH == material.heightPx)) break;
@@ -1114,27 +1212,35 @@ PlacementResult placePartsBitmapOnSingleSheet(const Polygon& sheet,
               const uint32_t count=uint32_t(std::min<uint64_t>(config.gpuBatchSize,end-cursor));
               const auto flags=gpuGrid(cursor,count,uint32_t(rows),searchStep,material.widthPx,material.heightPx);
               if(flags) {
-                for(uint32_t i=0;i<count && !bestScore;++i) {
-                  const bool found=(*flags)[i] && evaluate({int(cursor/rotations/rows)*searchStep,
-                      int((cursor/rotations)%rows)*searchStep,size_t(cursor%rotations)});
-                  if(!found) ++cursor;
+                const uint64_t first=cursor;
+                for(size_t offset=0;offset<count && !bestScore;offset+=validationBatch) {
+                  const size_t n=std::min(validationBatch,size_t(count)-offset);
+                  std::vector<Candidate> batch; batch.reserve(n);
+                  for(size_t i=0;i<n;++i) {
+                    const uint64_t p=first+offset+i;
+                    batch.push_back({int(p/rotations/rows)*searchStep,int((p/rotations)%rows)*searchStep,size_t(p%rotations)});
+                  }
+                  const auto found=evaluateBatch(batch,true,std::span<const uint8_t>(*flags).subspan(offset,n),true,false);
+                  cursor=first+offset+(found ? *found : n);
                 }
                 continue;
               }
             }
-            if (searchStep == 1) {
-              const auto next = rejected.next(cursor);
-              localStats.rejectedPositionSkips += size_t(next - cursor);
-              cursor = next;
-              if (cursor >= end) break;
+            std::vector<Candidate> batch;
+            std::vector<uint64_t> positions;
+            uint64_t next=cursor;
+            while(next<end && batch.size()<validationBatch) {
+              if(searchStep==1) {
+                const auto available=rejected.next(next);
+                localStats.rejectedPositionSkips+=size_t(available-next); next=available;
+              }
+              if(next>=end) break;
+              positions.push_back(next);
+              batch.push_back({int(next/rotations/rows)*searchStep,int((next/rotations)%rows)*searchStep,size_t(next%rotations)});
+              ++next;
             }
-            const uint64_t position = cursor;
-            const bool found = evaluate({static_cast<int>(position / rotations / rows) * searchStep,
-                      static_cast<int>((position / rotations) % rows) * searchStep,
-                      static_cast<size_t>(position % rotations)});
-            // Compaction may move a successful placement away from its first
-            // origin. Only a failed origin is a proven invalid prefix.
-            if (!found) ++cursor;
+            const auto found=evaluateBatch(batch,true,{},false,false);
+            cursor=found ? positions[*found] : next;
           }
         }
       }
@@ -1147,10 +1253,14 @@ PlacementResult placePartsBitmapOnSingleSheet(const Polygon& sheet,
           for (int iteration = 0; iteration < 8; ++iteration) {
             const int startX = acceptedX, startY = acceptedY;
             const auto previousScore = *bestScore;
+            std::vector<Candidate> batch;
             for (int dx : {-step, 0, step})
               for (int dy : {-step, 0, step})
-                for (size_t r = 0; r < rotationMasks.size(); ++r)
-                  evaluate({startX + dx, startY + dy, r});
+                for (size_t r = 0; r < rotationMasks.size(); ++r) {
+                  batch.push_back({startX+dx,startY+dy,r});
+                  if(batch.size()==validationBatch) { evaluateBatch(batch,false); batch.clear(); }
+                }
+            if(!batch.empty()) evaluateBatch(batch,false);
             if (*bestScore == previousScore) break;
           }
           if (step == searchStep) break;
@@ -1314,10 +1424,7 @@ PlacementResult placePartsBitmap(const std::vector<Polygon>& sheets,
   const bool hasHoles=std::any_of(parts.begin(),parts.end(),[](const Polygon& p) { return !p.children.empty(); });
   const int trialCount=parts.size()<6 && !hasHoles ? 1 : std::clamp(config.bitmapTrials,1,4);
   const int workerCount=std::min(trialCount,normalizeWorkerCount(config.threads));
-  const bool fineAngles=std::any_of(parts.begin(),parts.end(),[&](const Polygon& p) {
-    return p.allowedAngles.size()>64;
-  });
-  const int helpersPerTrial=fineAngles ? std::max(1,std::min(defaultWorkerCount(),normalizeWorkerCount(config.threads))/workerCount) : 1;
+  const int helpersPerTrial=std::max(1,normalizeWorkerCount(config.threads)/workerCount);
   // Keep one independently executed strategy's result and diagnostics.
   struct Trial { PlacementResult result; BitmapNestingStats stats; double elapsedMs{0}; bool started{false}; };
   std::vector<Trial> trials(size_t(trialCount), Trial{});
@@ -1388,6 +1495,7 @@ PlacementResult placePartsBitmap(const std::vector<Polygon>& sheets,
           t.rejectedPositionSkips+=s.rejectedPositionSkips;
           t.patternPlacements+=s.patternPlacements;
           t.holePlacements+=s.holePlacements;
+          t.candidateWorkersUsed=std::max(t.candidateWorkersUsed,s.candidateWorkersUsed);
           t.occupiedBoundsArea+=s.occupiedBoundsArea;
           t.perPart.insert(t.perPart.end(),s.perPart.begin(),s.perPart.end());
         }
@@ -1408,6 +1516,7 @@ PlacementResult placePartsBitmap(const std::vector<Polygon>& sheets,
           snapshot.completedTrials=trial.stats.timeLimitReached ? 0 : 1;
           snapshot.workersUsed=workerCount;
           snapshot.proposalWorkersPerTrial=helpersPerTrial;
+          snapshot.cpuWorkersUsed=workerCount*helpersPerTrial;
           std::lock_guard lock(layoutMutex);
           onLayout(trial.result,snapshot);
         }
@@ -1461,6 +1570,7 @@ PlacementResult placePartsBitmap(const std::vector<Polygon>& sheets,
   winner.stats.timeLimitReached=completedTrials<size_t(trialCount) && deadline.timedOut();
   winner.stats.workersUsed=workerCount;
   winner.stats.proposalWorkersPerTrial=helpersPerTrial;
+  winner.stats.cpuWorkersUsed=workerCount*helpersPerTrial;
   winner.stats.simdBackend=useAvx2 ? "avx2" : "scalar";
   winner.stats.totalBitmapMs=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-start).count();
   // Only publish the selected result, on the caller thread. Worker callbacks

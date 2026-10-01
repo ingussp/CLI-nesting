@@ -64,6 +64,13 @@ selects a uniform orientation count for one part and `rotation` adds an offset.
 Without a part rule the part defaults to four orientations (0, 90, 180, 270).
 GPU is entirely controlled by `config.gpu` (boolean or enabled/device/fallbackToCpu/batchSize
 object). `--list-gpus` is an optional device-discovery utility.
+Enabled GPU filtering applies to every candidate search path, including repeated
+rows and hole placement. `threads` controls the shared CPU worker budget even for
+one-angle parts, a single part type or mixed copy counts such as 1000 + 1.
+Output `cpuWorkersUsed` reports the allocated CPU pool and `candidateWorkersUsed`
+reports actual parallel geometry-check participation. `gpu.used`, `batches` and
+`fallbackReason` distinguish successful GPU work from CPU fallback. Hardware
+startup can outweigh search time on small jobs.
 
 The optimization objective is lexicographic: fewer unplaced instances, then smaller
 unused material area in used sheets, then smaller unused area in occupied bounding

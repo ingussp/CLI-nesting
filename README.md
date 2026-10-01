@@ -345,10 +345,20 @@ gpu true and an empty object use these defaults; gpu false does not load OpenCL.
 Indices need not match Task Manager numbering. Install a graphics driver with OpenCL.
 
 GPU handles bitmap collision batches. CPU builds geometry/proposals, validates
-exact contours and clearances, scores and commits placements. Small jobs can be
-solved by proposals without any GPU kernel. Full CPU/GPU utilization is not
-guaranteed or an optimization objective; startup overhead can make GPU slower.
-More than 64 orientations enable extra CPU proposal helpers within the worker budget.
+exact contours and clearances, scores and commits placements. With GPU enabled,
+hole, row, contact, grid and refinement candidates all use GPU filtering. Repeated
+rows use lookahead batches; cached positive results are rechecked against current
+occupancy before placement. CPU helpers use the configured thread budget regardless
+of the number of shapes, copies or allowed angles. The budget is shared between
+independent strategies and their helpers.
+After every candidate in an existing cavity fails for a shape and its angle
+policy, later identical copies search only newly added cavities: occupied
+material cannot become free as more parts are placed.
+
+These settings enable useful work on the selected hardware; they do not guarantee
+continuous 100% utilization. Layout commits remain ordered. Driver initialization
+and transfers can make short GPU-enabled jobs slower than CPU-only jobs. Empty or
+cancelled jobs may finish before any GPU work; failures follow `fallbackToCpu`.
 
 ## Output configuration
 
@@ -388,7 +398,9 @@ CAD exchange file, not JSON with a changed extension.
 | `timeLimitReached`, `stopReason` | completed, time_limit or user_stop. Continuous snapshot status describes its candidate, not session completion |
 | `timingMs`, `searchIteration` | Search/orchestration duration excluding file writing; zero-based restart of the saved candidate |
 | `trials`, `startedTrials`, `selectedTrial` | Strategy counts and winner diagnostics |
-| `workersUsed`, `proposalWorkersPerTrial` | Strategy workers and proposal helpers |
+| `workersUsed`, `proposalWorkersPerTrial` | Strategy worker count and CPU slots per strategy (including its caller) |
+| `cpuWorkersUsed` | Total CPU pool size across strategy workers and helpers; does not exceed `threads` |
+| `candidateWorkersUsed` | Largest number of CPU slots doing exact geometry checks in one batch of the selected strategy |
 | `patternPlacements`, `holePlacements`, `rejectedPositionSkips` | Pattern placements, copies inserted in part holes, and failed-position cache diagnostics |
 | `strategyResults` | Per-strategy counts, duration, completion and phase timings |
 | `gpu.requested`, `used`, `device`, `backend` | Request, actual kernel use, device and OpenCL backend |
@@ -465,7 +477,7 @@ ctest --test-dir build-release -C Release --output-on-failure
 The tests cover repeated contours, scanline rasterization against pixel-center
 sampling, hole-first ordering, rotated and concave holes, independent clearances,
 pattern spacing, timed strategy comparison, cancellation and GPU failure policy.
-
-GPU initialization is deferred until a grid batch is needed. A job completed by
-hole/pattern placement may report `gpu.requested: true` and `gpu.used: false`;
-enabling GPU is permission to use it, not a requirement to launch unnecessary work.
+They also compare serial/parallel layouts for 1000 copies plus a singleton with one
+allowed angle. When an OpenCL GPU is available, hardware tests check fast-path use,
+CPU/GPU layout agreement and bitmap word-boundary filtering. Otherwise those
+hardware checks print a skip reason; GPU failure-policy tests still run.

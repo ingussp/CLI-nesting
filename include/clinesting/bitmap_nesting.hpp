@@ -59,6 +59,8 @@ struct BitmapNestingStats {
   size_t completedTrials{1};
   size_t workersUsed{1};
   size_t proposalWorkersPerTrial{1};
+  size_t cpuWorkersUsed{1};
+  size_t candidateWorkersUsed{0};
   double occupiedBoundsArea{0.0};
   // Report one strategy's placement count and phase timings.
   struct TrialStats {
