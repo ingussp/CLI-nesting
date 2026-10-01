@@ -38,6 +38,7 @@ class ParallelLoop {
   size_t size() const { return count_; }
   // Distribute a range across the persistent worker slots and wait for completion.
   template<class F> void run(size_t count,F&& f) {
+    if(count<=1 || count_==1) { f(0,count,0); return; }
     {
       std::lock_guard lock(mutex_);
       task_=[&,count](size_t slot) { f(count*slot/count_,count*(slot+1)/count_,slot); };

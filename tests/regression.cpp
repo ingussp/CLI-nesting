@@ -1,8 +1,10 @@
 #include "clinesting/bitmap_nesting.hpp"
 #include "clinesting/geometry.hpp"
+#include "clinesting/gpu_bitmap.hpp"
 #include "clinesting/json_io.hpp"
 #include "raster_scanline.hpp"
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <iostream>
 #include <numbers>
@@ -27,6 +29,20 @@ std::vector<Polygon> transformed(const std::vector<Polygon>& parts,const Placeme
     out.push_back(shiftPolygon(rotatePolygon(*p,placement.rotation),{placement.x,placement.y,true}));
   }
   return out;
+}
+void sameLayout(const PlacementResult& a,const PlacementResult& b) {
+  require(a.placements.size()==b.placements.size(),"Hardware settings changed the number of sheets");
+  require(a.unplaced.size()==b.unplaced.size(),"Hardware settings changed the number of unplaced parts");
+  for(size_t i=0;i<a.unplaced.size();++i)
+    require(a.unplaced[i].id==b.unplaced[i].id,"Hardware settings changed an unplaced part");
+  for(size_t s=0;s<a.placements.size();++s) {
+    const auto& ap=a.placements[s].sheetplacements;
+    const auto& bp=b.placements[s].sheetplacements;
+    require(ap.size()==bp.size(),"Hardware settings changed a sheet's part count");
+    for(size_t i=0;i<ap.size();++i)
+      require(ap[i].id==bp[i].id && ap[i].x==bp[i].x && ap[i].y==bp[i].y &&
+              ap[i].rotation==bp[i].rotation,"Hardware settings changed deterministic placement");
+  }
 }
 // Deliberately exhaustive reference for clearance; no bounding-box early exit.
 double pointSegment(const Point& p,const Point& a,const Point& b) {
@@ -126,16 +142,20 @@ void concavePocket() {
   require(result.unplaced.size()==1,"Hole bounding box is not a containment test");
   valid(sheet,parts,result,cfg);
 }
-void rowsAndLazyGpu() {
+void rowsAndGpuPolicy() {
   auto cfg=settings();cfg.spacing=5;cfg.holeSpacing=5;cfg.gpuEnabled=true;
-  cfg.gpuFallbackToCpu=false;cfg.gpuDevice=1000; // Must never initialize for a successful pattern.
+  cfg.gpuFallbackToCpu=true;cfg.gpuDevice=1000;
   auto sheet=rectangle(0,0,100,100,99);sheet.children={rectangle(42,42,12,12)};
   std::vector<Polygon> parts;
   for(int i=0;i<6;++i) parts.push_back(rectangle(0,0,10,10,i+1));
   BitmapNestingStats stats;auto result=placePartsBitmap({sheet},parts,cfg,&stats);
   require(result.unplaced.empty() && stats.patternPlacements==6,"Repeated pattern should fit all six");
-  require(stats.gpuBatches==0 && stats.gpuDevice.empty(),"Unnecessary GPU initialization");
+  require(!stats.gpuFallbackReason.empty(),"Fast patterns must attempt the enabled GPU");
+  require(stats.gpuBatches==0,"An invalid GPU must not report successful GPU work");
   valid(sheet,parts,result,cfg);
+  cfg.gpuFallbackToCpu=false;bool threw=false;
+  try {placePartsBitmap({sheet},parts,cfg);} catch(const std::runtime_error&) {threw=true;}
+  require(threw,"Fast patterns must honor strict GPU failure policy");
   cfg.spacing=1000000;cfg.holeSpacing=1000000;cfg.gpuEnabled=false;
   cfg.bitmapResolutionMm=0.000001;auto tinySheet=rectangle(0,0,0.0001,0.0001,99);
   parts.clear();for(int i=0;i<6;++i) parts.push_back(rectangle(0,0,0.00001,0.00001,i+1));
@@ -143,11 +163,124 @@ void rowsAndLazyGpu() {
   require(result.unplaced.size()>=5,"Huge spacing must not overflow pattern stride");
 }
 void interrupted() {
-  auto cfg=settings();int checks=0;cfg.stopRequested=[&]{return ++checks>20;};
-  std::vector<Polygon> parts;for(int i=0;i<100;++i) parts.push_back(rectangle(0,0,10,10,i+1));
-  BitmapNestingStats stats;auto result=placePartsBitmap({rectangle(0,0,100,100,99)},parts,cfg,&stats);
+  auto cfg=settings();cfg.threads=4;
+  std::atomic<int> checks{0};
+  cfg.stopRequested=[&]{return checks.fetch_add(1,std::memory_order_relaxed)>700;};
+  std::vector<Polygon> parts;for(int i=0;i<1000;++i) parts.push_back(rectangle(0,0,10,10,i+1));
+  BitmapNestingStats stats;auto result=placePartsBitmap({rectangle(0,0,450,450,9999)},parts,cfg,&stats);
   size_t placed=0;for(const auto& s:result.placements) placed+=s.sheetplacements.size();
   require(stats.cancelled && placed+result.unplaced.size()==parts.size(),"Cancellation lost copies");
+  std::vector<int> ids;
+  for(const auto& s:result.placements) for(const auto& p:s.sheetplacements) ids.push_back(*p.id);
+  for(const auto& p:result.unplaced) ids.push_back(*p.id);
+  std::sort(ids.begin(),ids.end());
+  for(size_t i=0;i<ids.size();++i) require(ids[i]==int(i+1),"Cancellation duplicated or omitted a copy");
+}
+void mixedOneAngleWorkers() {
+  auto cfg=settings();auto sheet=rectangle(0,0,450,450,9999);
+  std::vector<Polygon> parts;
+  for(int i=0;i<1000;++i) parts.push_back(rectangle(0,0,10,10,i+1));
+  parts.push_back(rectangle(0,0,9,7,1001));
+  BitmapNestingStats serialStats;
+  const auto serial=placePartsBitmap({sheet},parts,cfg,&serialStats);
+  require(serial.unplaced.empty(),"The 1000-copy plus singleton reference must fit");
+  require(serialStats.cpuWorkersUsed==1,"Single-thread mode must use one CPU slot");
+  valid(sheet,parts,serial,cfg);
+  for(int threads:{4,12}) {
+    cfg.threads=threads;
+    // Changing the singleton's input position must not suppress acceleration.
+    if(threads==12) std::rotate(parts.begin(),parts.end()-1,parts.end());
+    BitmapNestingStats stats;const auto result=placePartsBitmap({sheet},parts,cfg,&stats);
+    sameLayout(serial,result);
+    require(stats.proposalWorkersPerTrial>1,"One-angle jobs must allocate CPU helpers");
+    require(stats.candidateWorkersUsed>1,"One-angle jobs must perform validation on multiple CPU workers");
+    require(stats.cpuWorkersUsed>1 && stats.cpuWorkersUsed<=size_t(threads),"CPU pool must respect the requested thread budget");
+    require(stats.candidateWorkersUsed<=stats.cpuWorkersUsed,"Validation workers must belong to the CPU pool");
+  }
+}
+void singletonWindowExpansion() {
+  auto cfg=settings();cfg.threads=4;
+  BitmapNestingStats stats;
+  const auto result=placePartsBitmap({rectangle(0,0,40,40,99)},{rectangle(0,0,10,8,1)},cfg,&stats);
+  require(result.unplaced.empty() && result.placements.size()==1 && result.placements.front().sheetplacements.size()==1,
+          "Singleton window expansion must place its part");
+  const auto& placed=result.placements.front().sheetplacements.front();
+  require(stats.searchWindowExpansions>0 && placed.x==2 && placed.y==2,
+          "Temporary search-window misses must not become permanent bitmap rejections");
+}
+void repeatedInsertsAfterHoleFills() {
+  auto cfg=settings();auto sheet=rectangle(0,0,350,350,9999);
+  auto host=rectangle(0,0,88,88,1);host.children={rectangle(13,13,62,62)};
+  std::vector<Polygon> parts{host};
+  for(int i=0;i<64;++i) {
+    auto p=rectangle(0,0,16,27,i+2);
+    p.allowedAngles.clear();for(int angle=0;angle<360;++angle) p.allowedAngles.push_back(angle);
+    parts.push_back(std::move(p));
+  }
+  BitmapNestingStats serialStats;
+  const auto serial=placePartsBitmap({sheet},parts,cfg,&serialStats);
+  require(serial.unplaced.empty() && serialStats.holePlacements>0 && serialStats.patternPlacements>0,
+          "Repeated inserts must fill the cavity then continue outside");
+  valid(sheet,parts,serial,cfg);
+  cfg.threads=12;BitmapNestingStats parallelStats;
+  const auto result=placePartsBitmap({sheet},parts,cfg,&parallelStats);
+  sameLayout(serial,result);
+  require(parallelStats.candidateWorkersUsed>1,"Many-angle cavity validation must use CPU helpers");
+}
+void gpuFastPathsWhenAvailable() {
+  std::vector<GpuDeviceInfo> devices;
+  try {devices=listGpuDevices();} catch(const std::exception& e) {
+    std::cout<<"Skipping GPU hardware checks: "<<e.what()<<"\n";return;
+  }
+  if(devices.empty()) {std::cout<<"Skipping GPU hardware checks: no OpenCL GPU\n";return;}
+  // Exercise shifted words and stock edges independently of candidate ordering.
+  {
+    GpuBitmap gpu(devices.front().index);
+    constexpr int width=130,height=6,stride=3,maskWidth=65,maskHeight=3,maskStride=2;
+    std::vector<uint64_t> material(stride*height),occupied(stride*height),bits(maskStride*maskHeight);
+    for(int y=0;y<height;++y) {
+      material[y*stride]=~uint64_t(0);material[y*stride+1]=~uint64_t(0);material[y*stride+2]=3;
+    }
+    material[4*stride+1]&=~(uint64_t(1)<<63);
+    occupied[1*stride+1]=1;occupied[4*stride]=2;
+    bits[0]=(uint64_t(1)<<63)|1;bits[1]=1;
+    bits[2]=(uint64_t(1)<<62)|2;bits[4]=uint64_t(1)<<32;
+    const std::vector<GpuMaskInfo> masks={{maskWidth,maskHeight,maskStride,0}};
+    gpu.setSheet(width,height,material);gpu.setOccupancy(occupied);gpu.setMasks(masks,bits);
+    std::vector<GpuCandidate> candidates;
+    for(int x:{-1,0,1,63,64,65,66}) for(int y:{0,1,3,4}) candidates.push_back({x,y,0});
+    candidates.push_back({0,0,1});
+    const auto flags=gpu.filter(candidates);
+    for(size_t i=0;i<candidates.size();++i) {
+      const auto& c=candidates[i];
+      bool expected=c.rotation==0 && c.x>=0 && c.y>=0 && c.x+maskWidth<=width && c.y+maskHeight<=height;
+      if(expected) for(int y=0;y<maskHeight;++y) for(int x=0;x<maskWidth;++x) {
+        if(!(bits[y*maskStride+x/64]&(uint64_t(1)<<(x%64)))) continue;
+        const int sx=c.x+x,sy=c.y+y;const uint64_t bit=uint64_t(1)<<(sx%64);
+        if(!(material[sy*stride+sx/64]&bit) || (occupied[sy*stride+sx/64]&bit)) expected=false;
+      }
+      require(bool(flags[i])==expected,"GPU shifted-word bitmap filter differs from pixel reference");
+    }
+  }
+  auto check=[&](const Polygon& sheet,const std::vector<Polygon>& parts,size_t expectedHoles,bool expectParallel) {
+    auto cfg=settings();cfg.threads=4;
+    const auto cpu=placePartsBitmap({sheet},parts,cfg);
+    require(cpu.unplaced.empty(),"GPU reference job must fit");
+    cfg.gpuEnabled=true;cfg.gpuFallbackToCpu=false;cfg.gpuDevice=devices.front().index;
+    BitmapNestingStats stats;const auto gpu=placePartsBitmap({sheet},parts,cfg,&stats);
+    require(stats.gpuBatches>0 && stats.gpuCandidates>0 && !stats.gpuDevice.empty(),
+            "Enabled GPU must process fast-path candidates");
+    require(stats.gpuFallbackReason.empty(),"Hardware checks must run on the GPU without fallback");
+    require(stats.holePlacements==expectedHoles,"GPU changed hole placement");
+    if(expectParallel) require(stats.candidateWorkersUsed>1,"GPU filtering must retain parallel CPU validation");
+    sameLayout(cpu,gpu);valid(sheet,parts,gpu,cfg);
+  };
+  std::vector<Polygon> repeated;
+  for(int i=0;i<32;++i) repeated.push_back(rectangle(0,0,10,10,i+1));
+  check(rectangle(0,0,100,100,99),repeated,0,true);
+  auto host=rectangle(0,0,40,40,2);host.children={rectangle(10,10,20,20)};
+  check(rectangle(0,0,44,44,99),{rectangle(0,0,10,10,1),host},1,false);
+  check(rectangle(0,0,40,40,99),{rectangle(0,0,10,8,1)},0,false);
 }
 void timedAlternatives() {
   auto cfg=settings();cfg.mode=SearchMode::Timed;cfg.bitmapTrials=4;cfg.threads=4;
@@ -177,14 +310,14 @@ void gpuFailurePolicy() {
   auto cfg=settings();cfg.gpuEnabled=true;cfg.gpuDevice=1000;
   auto sheet=rectangle(0,0,5,5,99);auto part=rectangle(0,0,10,10);
   BitmapNestingStats stats;auto result=placePartsBitmap({sheet},{part},cfg,&stats);
-  require(result.unplaced.size()==1 && !stats.gpuFallbackReason.empty(),"Lazy GPU must preserve CPU fallback");
+  require(result.unplaced.size()==1 && !stats.gpuFallbackReason.empty(),"GPU grid search must preserve CPU fallback");
   cfg.gpuFallbackToCpu=false;bool threw=false;
   try {placePartsBitmap({sheet},{part},cfg);} catch(const std::runtime_error&) {threw=true;}
-  require(threw,"Lazy GPU must preserve strict failure policy");
+  require(threw,"GPU grid search must preserve strict failure policy");
 }
 int main() {
   try {
-    scanlines();duplicateContours();holesFirst();rotatedAndMultipleHoles();concavePocket();rowsAndLazyGpu();interrupted();timedAlternatives();gpuFailurePolicy();
+    scanlines();duplicateContours();holesFirst();rotatedAndMultipleHoles();concavePocket();rowsAndGpuPolicy();interrupted();mixedOneAngleWorkers();repeatedInsertsAfterHoleFills();singletonWindowExpansion();timedAlternatives();gpuFailurePolicy();gpuFastPathsWhenAvailable();
     std::cout<<"All nesting regression checks passed\n";return 0;
   } catch(const std::exception& e) {std::cerr<<e.what()<<"\n";return 1;}
 }

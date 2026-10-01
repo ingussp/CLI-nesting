@@ -318,6 +318,7 @@ void writeNestingJson(const std::filesystem::path& path,const BackgroundRequest&
     {"unplacedCount",r.unplaced.size()},{"utilisation",r.utilisation},{"timingMs",run.timings.totalMs},
     {"trials",run.bitmapStats.completedTrials},{"workersUsed",run.bitmapStats.workersUsed},
     {"proposalWorkersPerTrial",run.bitmapStats.proposalWorkersPerTrial},
+    {"cpuWorkersUsed",run.bitmapStats.cpuWorkersUsed},{"candidateWorkersUsed",run.bitmapStats.candidateWorkersUsed},
     {"patternPlacements",run.bitmapStats.patternPlacements},{"rejectedPositionSkips",run.bitmapStats.rejectedPositionSkips},
     {"holePlacements",run.bitmapStats.holePlacements},
     {"sheets",Json::array()},{"unplaced",Json::array()}};
