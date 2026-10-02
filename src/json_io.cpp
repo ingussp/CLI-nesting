@@ -265,6 +265,7 @@ BackgroundRequest parseNestingJson(std::string_view text) {
           return path;
         };
         if(key=="json" || key=="resultJson") request.output.json=pathValue();
+        else if(key=="cancelFile") request.output.cancelFile=pathValue();
         else if(key=="dxf" || key=="svg") {
           auto& path=key=="dxf" ? request.output.dxf : request.output.svg;
           path=value.is_boolean() ? (value.get<bool>() ? "result."+key : "") : pathValue();

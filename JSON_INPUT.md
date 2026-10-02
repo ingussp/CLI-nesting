@@ -90,6 +90,23 @@ are rejected.
 
 ## Dependencies
 
+### FreeCAD/workbench file protocol
+
+`job_id` is echoed unchanged into every result. Paths resolve relative to the
+input directory. `output.cancelFile` is an optional path to a cooperative stop
+marker: creating it requests cancellation even when the Windows process has no
+console. Use a different marker name for each job and remove any old marker
+before launch. Input, output, temporary publication and cancellation paths must
+be distinct.
+
+First/timed jobs atomically publish `output.json` (default `result.json`).
+Continuous mode locks and clears `results/`, saves improving numbered snapshots,
+and also atomically replaces `output.json` with the latest complete snapshot.
+The latest result and cancel marker must be outside the history directory.
+Numbered history is published before the latest snapshot; a result file means
+that snapshot is complete, not that the continuous process has stopped. Poll
+the process separately and preserve valid saved results when cancelling.
+
 Vendored nlohmann/json v3.11.3, commit 9cca280a4d0ccf0c08f47a99aa71d1b0e52f8d03:
 MIT license retained beside the header.
 Khronos OpenCL-Headers v2024.10.24, commit 4ea6df132107e3b4b9407f903204b5522fdffcd6:

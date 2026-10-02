@@ -61,5 +61,11 @@ if(CLINESTING_BUILD_TESTS)
   target_include_directories(clinesting_tests PRIVATE src)
   target_link_libraries(clinesting_tests PRIVATE clinesting)
   add_test(NAME nesting_regression COMMAND clinesting_tests)
+  find_package(Python3 COMPONENTS Interpreter QUIET)
+  if(Python3_Interpreter_FOUND)
+    add_test(NAME workbench_protocol
+      COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/workbench_protocol.py
+              --exe $<TARGET_FILE:clinesting_cli>)
+  endif()
 endif()
 
