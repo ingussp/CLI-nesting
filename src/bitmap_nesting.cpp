@@ -6,6 +6,7 @@
 #include "parallel_loop.hpp"
 #include "search_deadline.hpp"
 #include "raster_scanline.hpp"
+#include "free_rectangles.hpp"
 #include <random>
 
 #include <algorithm>
@@ -82,6 +83,9 @@ struct RasterMask {
   mutable std::vector<uint64_t> bits;
   std::vector<Point> contacts;
   mutable std::vector<int> collisionRows;
+  mutable detail::PixelRect filledCore;
+  mutable detail::PixelRect geometricCore;
+  mutable bool coreVerified{false};
 };
 
 // Uniform spatial bins only select neighbours. Original polygons remain authoritative.
@@ -369,16 +373,23 @@ void rasterizeMaskPixels(const RasterMask& mask, double resolutionMm, const Sear
   mask.bits.assign(mask.wordsPerRow * static_cast<size_t>(mask.heightPx), 0ULL);
 
   parallel.run(size_t(mask.heightPx),[&](size_t begin,size_t end,size_t) {
+  std::vector<double> crossings;
   for (int y = int(begin); y < int(end); ++y) {
     if(deadline) deadline->check();
     const double py = mask.minY + (static_cast<double>(y) + 0.5) * resolutionMm;
-    for (int x = 0; x < mask.widthPx; ++x) {
-      const double px = mask.minX + (static_cast<double>(x) + 0.5) * resolutionMm;
-      if (pointInPolygonMaterial(mask.rotatedPart, {px, py, true})) {
-        const size_t idx = static_cast<size_t>(y) * mask.wordsPerRow + static_cast<size_t>(x / 64);
-        mask.bits[idx] |= (1ULL << static_cast<unsigned>(x % 64));
-      }
-    }
+    auto fill=[&](const Polygon& contour,bool material) {
+      detail::rasterContourRow(contour.points,py,mask.minX,resolutionMm,mask.widthPx,crossings,[&](int first,int last) {
+        while(first<last) {
+          const int word=first/64,offset=first%64,n=std::min(last-first,64-offset);
+          const uint64_t bits=(~uint64_t(0)>>(64-n))<<offset;
+          auto& value=mask.bits[size_t(y)*mask.wordsPerRow+size_t(word)];
+          if(material) value|=bits; else value&=~bits;
+          first+=n;
+        }
+      });
+    };
+    fill(mask.rotatedPart,true);
+    for(const auto& hole:mask.rotatedPart.children) fill(hole,false);
   }
 
   });
@@ -396,6 +407,45 @@ void rasterizeMaskPixels(const RasterMask& mask, double resolutionMm, const Sear
   std::sort(density.begin(), density.end());
   mask.collisionRows.reserve(density.size());
   for (const auto& entry : density) mask.collisionRows.push_back(entry.second);
+  mask.filledCore={};
+  if(!density.empty()) {
+    int ymin=mask.heightPx,ymax=0;
+    for(const auto& entry:density) {ymin=std::min(ymin,entry.second);ymax=std::max(ymax,entry.second);}
+    std::vector<uint64_t> common(mask.wordsPerRow,~uint64_t(0));
+    for(int y=ymin;y<=ymax;++y) {
+      if(deadline) deadline->check();
+      for(size_t w=0;w<common.size();++w) common[w]&=mask.bits[size_t(y)*mask.wordsPerRow+w];
+    }
+    int start=0;
+    for(int x=0;x<=mask.widthPx;++x) {
+      if(x<mask.widthPx && (common[size_t(x)/64]&(uint64_t(1)<<(x%64)))) continue;
+      if(x-start>mask.filledCore.width) mask.filledCore={start,ymin,x-start,ymax-ymin+1};
+      start=x+1;
+    }
+    if(int64_t(mask.filledCore.width)*mask.filledCore.height < int64_t(mask.widthPx)*(ymax-ymin+1)*9/10) {
+      // Edge notches can make a full-height stripe very narrow. A histogram
+      // finds the largest genuinely filled rectangle without approximating
+      // holes, concavities, or a curved boundary as solid material.
+      std::vector<int> heights(size_t(mask.widthPx),0),stack;
+      stack.reserve(size_t(mask.widthPx)+1);
+      for(int y=ymin;y<=ymax;++y) {
+        if(deadline) deadline->check();
+        stack.clear();
+        for(int x=0;x<=mask.widthPx;++x) {
+          const int h=x==mask.widthPx ? 0 :
+            (mask.bits[size_t(y)*mask.wordsPerRow+size_t(x)/64]&(uint64_t(1)<<(x%64))) ? heights[size_t(x)]+1 : 0;
+          if(x<mask.widthPx) heights[size_t(x)]=h;
+          while(!stack.empty() && heights[size_t(stack.back())]>h) {
+            const int height=heights[size_t(stack.back())];stack.pop_back();
+            const int left=stack.empty() ? 0 : stack.back()+1;
+            if(int64_t(x-left)*height>int64_t(mask.filledCore.width)*mask.filledCore.height)
+              mask.filledCore={left,y-height+1,x-left,height};
+          }
+          stack.push_back(x);
+        }
+      }
+    }
+  }
 }
 
 // Pixel data can be discarded without invalidating placements, which retain
@@ -662,6 +712,7 @@ PlacementResult placePartsBitmapOnSingleSheet(const Polygon& sheet,
                                               const std::vector<Polygon>& parts,
                                               const Config& config,
                                               ParallelLoop& parallel,
+                                              std::unique_ptr<GpuBitmap>& gpu,
                                               const SearchDeadline& deadline,
                                               bool useAvx2,
                                               BitmapNestingStats* stats,
@@ -681,6 +732,8 @@ PlacementResult placePartsBitmapOnSingleSheet(const Polygon& sheet,
     return out;
   }
   BitmapGrid occupancy = makeBitmapGrid(material.widthPx, material.heightPx);
+  detail::FreeRectangles freeRectangles(material.widthPx,material.heightPx);
+  detail::FreeRectangles clearanceRectangles(material.widthPx,material.heightPx);
 
   // Heap-own masks so pointers in rotationMasks/rasterPlacements stay valid
   // even when the lookup table grows to thousands of requested angles.
@@ -715,7 +768,7 @@ PlacementResult placePartsBitmapOnSingleSheet(const Polygon& sheet,
   size_t unplacedCount = 0;
   const size_t totalParts = parts.size();
   const int searchStep = std::max(1, config.bitmapSearchStepPx);
-  std::unique_ptr<GpuBitmap> gpu;
+  bool gpuSheetUploaded=false;
   bool gpuAvailable=config.gpuEnabled;
   auto gpuFailed=[&](const std::exception& e) {
     if(!config.gpuFallbackToCpu) throw std::runtime_error(e.what());
@@ -774,13 +827,41 @@ PlacementResult placePartsBitmapOnSingleSheet(const Polygon& sheet,
       globalMaxOriginX = std::max(globalMaxOriginX, material.widthPx - mask->widthPx);
       globalMaxOriginY = std::max(globalMaxOriginY, material.heightPx - mask->heightPx);
     }
+    if(rotationMasks.size()<=16) {
+      PhaseTimer timer{localStats.phases.preparationMs};
+      // Keep dense angular searches lazy: proving a rejection must not force
+      // hundreds of otherwise unused masks into the bounded pixel cache.
+      bool possible=false;
+      for(const auto* mask:rotationMasks) {
+        pixels.ensure(*mask);
+        if(!mask->coreVerified) {
+          auto core=mask->filledCore;
+          // Pixel centres alone cannot prove continuous material containment.
+          // Verify the rectangle before using it to rule out clearance gaps.
+          for(int attempt=0;attempt<2 && core.width>0 && core.height>0;++attempt) {
+            const double x=mask->minX+core.x*config.bitmapResolutionMm,y=mask->minY+core.y*config.bitmapResolutionMm;
+            const double w=core.width*config.bitmapResolutionMm,h=core.height*config.bitmapResolutionMm;
+            Polygon box;box.points={{x,y,true},{x+w,y,true},{x+w,y+h,true},{x,y+h,true}};
+            if(!hasMaterialOutsideSheet(box,mask->rotatedPart,config)) {mask->geometricCore=core;break;}
+            ++core.x;++core.y;core.width-=2;core.height-=2;
+          }
+          mask->coreVerified=true;
+        }
+        if(freeRectangles.fits(mask->filledCore.width,mask->filledCore.height) &&
+           clearanceRectangles.fits(mask->geometricCore.width,mask->geometricCore.height)) possible=true;
+      }
+      if(!possible && !rasterPlacements.empty()) exhausted.insert(searchIdentity);
+    }
 
     auto prepareGpu=[&] {
       deadline.check();
       if(!gpu) {
         gpu=std::make_unique<GpuBitmap>(config.gpuDevice);
-        localStats.gpuDevice=gpu->device().name;
+      }
+      localStats.gpuDevice=gpu->device().name;
+      if(!gpuSheetUploaded) {
         gpu->setSheet(material.widthPx,material.heightPx,material.bits);
+        gpuSheetUploaded=true;
       }
       if(gpuMaskIdentity!=searchIdentity) {
         uint64_t total=0;
@@ -1310,6 +1391,24 @@ PlacementResult placePartsBitmapOnSingleSheet(const Polygon& sheet,
     }
     placements.push_back(*acceptedPlacement);
     RasterPlacement raster{acceptedX, acceptedY, acceptedMask, identity};
+    auto core=acceptedMask->filledCore;
+    core.x+=acceptedX;core.y+=acceptedY;
+    // Thin cores of stars/rings provide little proof and fragment the free
+    // rectangles severely. Omitting an obstacle only weakens this rejection.
+    const int64_t maskArea=int64_t(acceptedMask->widthPx)*acceptedMask->heightPx;
+    if(int64_t(core.width)*core.height>=maskArea/2) freeRectangles.occupy(core);
+    auto exactCore=acceptedMask->geometricCore;
+    if(exactCore.width>0 && exactCore.height>0 && int64_t(exactCore.width)*exactCore.height>=maskArea/2) {
+      exactCore.x+=acceptedX;exactCore.y+=acceptedY;
+      const double gap=std::min(config.spacing,config.holeSpacing)/config.bitmapResolutionMm;
+      const int axis=int(std::min(double(std::max(material.widthPx,material.heightPx)),std::floor(gap)));
+      const int diagonal=int(std::min(double(std::max(material.widthPx,material.heightPx)),std::floor(gap/std::sqrt(2.0))));
+      // This cross plus its corner square lies inside the Euclidean clearance
+      // offset. It cannot reject a legal diagonal placement or a nesting hole.
+      clearanceRectangles.occupy({exactCore.x-axis,exactCore.y,exactCore.width+2*axis,exactCore.height});
+      clearanceRectangles.occupy({exactCore.x,exactCore.y-axis,exactCore.width,exactCore.height+2*axis});
+      clearanceRectangles.occupy({exactCore.x-diagonal,exactCore.y-diagonal,exactCore.width+2*diagonal,exactCore.height+2*diagonal});
+    }
     rasterPlacements.push_back(raster);
     repeated[identity].push_back(raster);
     usedWidth = std::max(usedWidth, acceptedX + acceptedMask->widthPx);
@@ -1466,11 +1565,14 @@ PlacementResult placePartsBitmap(const std::vector<Polygon>& sheets,
         }
         auto& trial=trials[size_t(i)];
         trial.started=true;
+        // A strategy runs its sheets serially. Reuse its OpenCL context and
+        // compiled kernels while replacing sheet/mask/occupancy buffers.
+        std::unique_ptr<GpuBitmap> gpu;
         for (const auto& sheet:sheets) {
           if (remaining.empty()) break;
           if(deadline.expired()) { trial.stats.timeLimitReached=true; break; }
           BitmapNestingStats s;
-          auto r=placePartsBitmapOnSingleSheet(sheet,remaining,cfg,parallel,deadline,useAvx2,&s,{});
+          auto r=placePartsBitmapOnSingleSheet(sheet,remaining,cfg,parallel,gpu,deadline,useAvx2,&s,{});
           trial.result.area+=r.area;
           trial.result.totalarea+=r.totalarea;
           trial.result.placements.insert(trial.result.placements.end(),r.placements.begin(),r.placements.end());
