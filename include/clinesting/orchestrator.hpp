@@ -22,6 +22,7 @@ struct BackgroundRequest {
   // Select output filenames, formats and preview opening.
   struct OutputOptions {
     std::string json{"result.json"};
+    std::string cancelFile; // Optional cooperative stop marker, relative to input.json.
     std::string dxf;
     std::string svg;
     bool openPreview{false};

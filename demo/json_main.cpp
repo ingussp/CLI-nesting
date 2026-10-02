@@ -8,12 +8,15 @@
 #include <iostream>
 #include <optional>
 #include <cctype>
+#include <chrono>
 #ifdef _WIN32
 #include <shellapi.h>
 #endif
 
 namespace {
 std::atomic<bool> stopRequested{false};
+std::optional<std::filesystem::path> cancelFile;
+std::atomic<int64_t> nextCancelCheck{0};
 static_assert(std::atomic<bool>::is_always_lock_free);
 #ifdef _WIN32
 HANDLE sessionFinished=nullptr;
@@ -50,8 +53,38 @@ struct Signals {
 #endif
   }
 };
+// Publish a complete root result; GUI readers see the old or the new JSON.
+void publishResult(const std::filesystem::path& output,const clinesting::BackgroundRequest& request,
+                   const clinesting::OrchestratorRunStats& result) {
+  auto temporary=output; temporary+=".tmp";
+  try {
+    std::filesystem::create_directories(output.parent_path());
+    clinesting::writeNestingJson(temporary,request,result);
+#ifdef _WIN32
+    if(!MoveFileExW(temporary.c_str(),output.c_str(),MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH))
+      throw std::runtime_error("Cannot publish latest result JSON");
+#else
+    std::filesystem::rename(temporary,output);
+#endif
+  } catch(...) {
+    std::error_code ignored; std::filesystem::remove(temporary,ignored); throw;
+  }
+}
 // Read the process-wide cooperative stop request.
-bool stopped() { return stopRequested.load(std::memory_order_relaxed); }
+bool stopped() {
+  if(stopRequested.load(std::memory_order_relaxed)) return true;
+  if(cancelFile) {
+    const auto now=std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+    auto next=nextCancelCheck.load(std::memory_order_relaxed);
+    if(now>=next && nextCancelCheck.compare_exchange_strong(next,now+100,std::memory_order_relaxed)) {
+      std::error_code error;
+      if(std::filesystem::exists(*cancelFile,error) && !error)
+        stopRequested.store(true,std::memory_order_relaxed);
+    }
+  }
+  return stopRequested.load(std::memory_order_relaxed);
+}
 // Open the saved SVG with the platform's associated viewer.
 void preview(const std::filesystem::path& path) {
 #ifdef _WIN32
@@ -111,6 +144,7 @@ int main(int argc,char** argv) {
           <<"All settings belong in input.json: config.mode=first|timed|continuous, config.gpu, output.json/dxf/svg/openPreview.\n"
           <<"first: one complete greedy layout. timed: optimize until timeLimitSeconds expires.\n"
           <<"continuous: optimize until Ctrl+C or console close; clear results next to input and save resultN files.\n"
+          <<"output.cancelFile is an optional cooperative cancellation marker.\n"
           <<"JSON output paths are relative to input.json. --list-gpus lists OpenCL devices.\n"
           <<"Legacy overrides: --output result.json --dxf result.dxf --threads N --trials 1..4.\n";
         return 0;
@@ -141,12 +175,19 @@ int main(int argc,char** argv) {
         throw std::invalid_argument("Conflicting DXF paths");
       dxf=output; output.replace_extension(".json");
     }
+    if(!request.output.cancelFile.empty()) cancelFile=resolve(request.output.cancelFile);
     std::vector<fs::path> paths{absoluteInput,output};
+    if(cancelFile) paths.push_back(*cancelFile);
+    auto temporaryOutput=output; temporaryOutput+=".tmp";
+    paths.push_back(temporaryOutput);
     if(dxf) paths.push_back(*dxf);
     if(svg) paths.push_back(*svg);
     validatePaths(paths);
     Signals signals;
     if(request.config.mode==clinesting::SearchMode::Continuous) {
+      if(clinesting::cli::within(clinesting::cli::resolvePath(output),base/"results") ||
+         (cancelFile && clinesting::cli::within(clinesting::cli::resolvePath(*cancelFile),base/"results")))
+        throw std::invalid_argument("Latest result and cancel file must be outside continuous results history");
       clinesting::cli::ResultDirectory results(base,absoluteInput);
       std::cout<<"Continuous search: cleared "<<results.path().string()<<"\n"
                <<"Press Ctrl+C or close this console to stop. Improving layouts are saved immediately.\n"
@@ -154,6 +195,7 @@ int main(int argc,char** argv) {
       size_t saved=0;
       clinesting::runContinuousNesting(request,stopped,[&](const auto& candidate,const auto& result,size_t sequence) {
         results.save(sequence,candidate,result,dxf.has_value(),svg.has_value());
+        publishResult(output,candidate,result);
         saved=sequence;
         const auto quality=clinesting::layoutQuality(candidate.sheets,result.placement,result.bitmapStats);
         std::cout<<"Saved result"<<sequence<<".json"<<(dxf ? " + DXF" : "")<<(svg ? " + SVG" : "")
@@ -182,7 +224,7 @@ int main(int argc,char** argv) {
       const auto parent=fs::absolute(paths[i]).parent_path();
       fs::create_directories(parent);
     }
-    clinesting::writeNestingJson(output,request,result);
+    publishResult(output,request,result);
     if(dxf) clinesting::exportPlacementResultToDxf(*dxf,request.sheets,request.individual.placement,result.placement);
     if(svg) clinesting::cli::exportSvg(*svg,request.sheets,request.individual.placement,result.placement);
     std::cout<<"Placed: "<<request.individual.placement.size()-result.placement.unplaced.size()
