@@ -3,6 +3,7 @@
 #include "clinesting/gpu_bitmap.hpp"
 #include "clinesting/json_io.hpp"
 #include "raster_scanline.hpp"
+#include "free_rectangles.hpp"
 #include <algorithm>
 #include <atomic>
 #include <cmath>
@@ -315,9 +316,55 @@ void gpuFailurePolicy() {
   try {placePartsBitmap({sheet},{part},cfg);} catch(const std::runtime_error&) {threw=true;}
   require(threw,"GPU grid search must preserve strict failure policy");
 }
+void freeRectangleProof() {
+  std::mt19937 random(729);
+  for(int trial=0;trial<30;++trial) {
+    detail::FreeRectangles space(12,9);
+    bool occupied[9][12]{};
+    for(int step=0;step<12;++step) {
+      detail::PixelRect r{int(random()%14)-1,int(random()%11)-1,1+int(random()%5),1+int(random()%5)};
+      space.occupy(r);
+      for(int y=0;y<9;++y) for(int x=0;x<12;++x)
+        if(x>=r.x && y>=r.y && x<r.x+r.width && y<r.y+r.height) occupied[y][x]=true;
+      for(int h=1;h<=9;++h) for(int w=1;w<=12;++w) {
+        bool possible=false;
+        for(int y=0;y+h<=9;++y) for(int x=0;x+w<=12;++x) {
+          bool clear=true;
+          for(int dy=0;dy<h;++dy) for(int dx=0;dx<w;++dx) clear=clear && !occupied[y+dy][x+dx];
+          possible=possible || clear;
+        }
+        require(space.fits(w,h)==possible,"Free-rectangle proof differs from exhaustive bitmap reference");
+      }
+    }
+  }
+}
+void mixedPanelsAndMultipleSheets() {
+  auto cfg=settings();cfg.spacing=6.5;cfg.holeSpacing=6.5;cfg.sheetSpacing=0;cfg.threads=4;
+  std::vector<Polygon> sheets,parts;
+  for(int i=0;i<4;++i) sheets.push_back(rectangle(0,0,2000,2800,100+i));
+  for(int i=0;i<4;++i) {
+    auto p=rectangle(0,0,1250+i*10,1800,i+1);p.allowedAngles={0,90,180,270};parts.push_back(p);
+  }
+  for(int i=0;i<12;++i) {auto p=rectangle(0,0,200+i,250,i+10);p.allowedAngles={0,90,180,270};parts.push_back(p);}
+  BitmapNestingStats stats;
+  const auto cpu=placePartsBitmap(sheets,parts,cfg,&stats);
+  require(cpu.unplaced.empty(),"Mixed panels must advance to remaining sheets");
+  require(stats.fineFallbacks==0 && stats.candidatesExamined<200000,"Impossible panels entered the exhaustive pixel scan");
+  for(const auto& placement:cpu.placements) {
+    PlacementResult one;one.placements={placement};
+    valid(sheets.front(),parts,one,cfg);
+  }
+  std::vector<GpuDeviceInfo> devices;
+  try {devices=listGpuDevices();} catch(const std::exception&) {return;}
+  if(devices.empty()) return;
+  cfg.gpuEnabled=true;cfg.gpuFallbackToCpu=false;cfg.gpuDevice=devices.front().index;
+  const auto gpu=placePartsBitmap(sheets,parts,cfg,&stats);
+  require(stats.gpuBatches>0 && stats.gpuFallbackReason.empty(),"Multi-sheet GPU job did not use the GPU");
+  sameLayout(cpu,gpu);
+}
 int main() {
   try {
-    scanlines();duplicateContours();holesFirst();rotatedAndMultipleHoles();concavePocket();rowsAndGpuPolicy();interrupted();mixedOneAngleWorkers();repeatedInsertsAfterHoleFills();singletonWindowExpansion();timedAlternatives();gpuFailurePolicy();gpuFastPathsWhenAvailable();
+    scanlines();freeRectangleProof();mixedPanelsAndMultipleSheets();duplicateContours();holesFirst();rotatedAndMultipleHoles();concavePocket();rowsAndGpuPolicy();interrupted();mixedOneAngleWorkers();repeatedInsertsAfterHoleFills();singletonWindowExpansion();timedAlternatives();gpuFailurePolicy();gpuFastPathsWhenAvailable();
     std::cout<<"All nesting regression checks passed\n";return 0;
   } catch(const std::exception& e) {std::cerr<<e.what()<<"\n";return 1;}
 }
