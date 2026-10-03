@@ -483,21 +483,35 @@ CPU/GPU layout agreement and bitmap word-boundary filtering. Otherwise those
 hardware checks print a skip reason; GPU failure-policy tests still run.
 
 
-### Fast bottom-left furniture search
+### Search modes and subpixel clearance
 
-Set `config.bitmapSearch` to `"bottom-left"` for larger parts first and contact
-positions ordered by lowest Y, then lowest X. Bitmap collisions and exact geometry
-clearance validation remain enabled. NFP contacts, pair patterns, grid scans and
-local grid refinement are skipped. Stock size, allowed angles and GPU settings remain respected.
+`mode: "first"` automatically builds one large-first, bottom-left bitmap layout.
+It tries contact positions and existing hole pockets without NFP contact proposals,
+pair patterns or exhaustive grid fallback. No additional bitmapSearch input option
+is needed. This fast heuristic can miss feasible pockets or use additional sheets.
 
-The default `"compact"` search is unchanged. Bottom-left is a heuristic and can
-miss feasible pockets, especially concave outlines and holes, leave parts unplaced
-or use more sheets. It runs one strategy per iteration; timed/continuous modes can
-still restart. Result JSON reports `bitmapSearch`.
+`mode: "timed"` first retains the same fast layout, then compares different part
+orders, permitted orientations and contact/compact strategies until the shared
+time limit. `continuous` keeps searching until cancellation. Search rounds after
+the initial layout are capped at one second to allow multiple restarts. Ranking
+prioritizes fewer unplaced parts, then less used-sheet waste, then compactness.
+Only improvements replace the incumbent. A finite time budget does not enumerate
+all permutations or prove an optimum. `searchIterations` reports attempted
+iterations including the initial seed in timed/continuous mode.
 
-Example config: `{"mode":"first","bitmapSearch":"bottom-left","resolution":1,
-"threads":12,"spacing":6.5,"gpu":false}`.
+After each strategy finishes placing parts, bounded vector refinement moves
+parts down/left using continuous coordinates and exact polygon clearance checks.
+It keeps original geometry and rotations, checks sheet margins, stock cutouts,
+part outlines and holes, and never reuses stale bitmap occupancy after moving.
+The refinement performs at most three sweeps and narrows blocked translations to
+0.001 mm; this is a search tolerance, not a CAD manufacturing accuracy guarantee.
+The gap is a minimum: not every pair of parts can have exactly that gap.
+At 1 mm bitmap resolution, contacting straight edges can therefore approach
+6.5 mm clearance instead of retaining a grid-rounded 7 mm gap. No 0.1 mm raster
+or NFP backend is needed for this refinement.
 
-Clearance is a minimum, not a requirement that every gap is identical. Coordinates
-remain on the bitmap grid: a 6.5 mm bounding-box gap at 1 mm resolution is proposed
-as 7 mm. This change does not introduce subpixel placement.
+Time limits and cancellation also apply during refinement. An interrupted result
+retains only already validated moves. Result JSON reports `vectorRefinement`
+(checks, moves, elapsed milliseconds, tolerance and completion) and `bitmapSearch`
+(`bottom-left` for first; `portfolio` for timed/continuous). Refinement keeps the
+placed count and sheets unchanged; it does not reinsert currently unplaced parts.

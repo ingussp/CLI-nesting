@@ -81,9 +81,25 @@ static OrchestratorRunStats optimize(BackgroundRequest request,const std::functi
     void onResult(const PlacementResult&) override {}
   } sink;
   BackgroundOrchestrator orchestrator;
+  // Establish the same refined baseline as first mode before spending the
+  // remaining budget on competing orders and strategies. GPU setup is included
+  // in the overall deadline, not an artificially short restart deadline.
+  if(!stop() && !expired()) {
+    auto seed=request;
+    seed.config.mode=SearchMode::First;
+    seed.config.bitmapTrials=1;
+    seed.config.timeLimitSeconds=timed ? std::max(0.000001,std::chrono::duration<double>(end-std::chrono::steady_clock::now()).count()) : request.config.continuousRoundSeconds;
+    const auto initial=orchestrator.runWithStats(seed,sink,consider);
+    gpuBatches+=initial.bitmapStats.gpuBatches;
+    gpuCandidates+=initial.bitmapStats.gpuCandidates;
+    gpuDevice=initial.bitmapStats.gpuDevice;
+    gpuFallback=initial.bitmapStats.gpuFallbackReason;
+    consider(initial.placement,initial.bitmapStats);
+    request.config.searchIteration=1;
+  }
   while(!stop() && !expired()) {
-    request.config.timeLimitSeconds=timed ? std::min(request.config.continuousRoundSeconds,
-        std::chrono::duration<double>(end-std::chrono::steady_clock::now()).count()) : request.config.continuousRoundSeconds;
+    request.config.timeLimitSeconds=timed ? std::min(std::min(1.0,request.config.continuousRoundSeconds),
+        std::chrono::duration<double>(end-std::chrono::steady_clock::now()).count()) : std::min(1.0,request.config.continuousRoundSeconds);
     if(request.config.timeLimitSeconds<=0) break;
     const auto result=orchestrator.runWithStats(request,sink,consider);
     gpuBatches+=result.bitmapStats.gpuBatches;
@@ -94,6 +110,7 @@ static OrchestratorRunStats optimize(BackgroundRequest request,const std::functi
     consider(result.placement,result.bitmapStats);
     ++request.config.searchIteration;
   }
+  best.bitmapStats.searchIterations=request.config.searchIteration;
   best.bitmapStats.cancelled=stop();
   best.bitmapStats.gpuBatches=gpuBatches;
   best.bitmapStats.gpuCandidates=gpuCandidates;

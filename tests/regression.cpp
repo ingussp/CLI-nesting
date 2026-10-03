@@ -2,6 +2,7 @@
 #include "clinesting/geometry.hpp"
 #include "clinesting/gpu_bitmap.hpp"
 #include "clinesting/json_io.hpp"
+#include "clinesting/continuous_nesting.hpp"
 #include "raster_scanline.hpp"
 #include "free_rectangles.hpp"
 #include <algorithm>
@@ -363,11 +364,6 @@ void mixedPanelsAndMultipleSheets() {
   sameLayout(cpu,gpu);
 }
 void bottomLeftSearch() {
-  auto parsed=parseNestingJson(R"({"config":{"bitmapSearch":"bottom-left"},"sheets":[{"width":100,"height":80}],"parts":[{"points":[[0,0],[10,0],[10,10],[0,10]]}]})");
-  require(parsed.config.bitmapBottomLeft,"JSON must enable bottom-left explicitly");
-  bool invalid=false;
-  try {parseNestingJson(R"({"config":{"bitmapSearch":"unknown"},"sheets":[{"width":100,"height":80}],"parts":[{"points":[[0,0],[10,0],[10,10],[0,10]]}]})");} catch(const std::invalid_argument&) {invalid=true;}
-  require(invalid,"Unknown bitmapSearch must fail validation");
   auto cfg=settings();cfg.bitmapBottomLeft=true;cfg.spacing=6.5;cfg.holeSpacing=6.5;cfg.sheetSpacing=0;cfg.threads=1;
   auto sheet=rectangle(0,0,100,80,99);
   std::vector<Polygon> parts{rectangle(0,0,10,10,1),rectangle(0,0,20,20,2),rectangle(0,0,40,30,3)};
@@ -376,7 +372,7 @@ void bottomLeftSearch() {
   require(result.unplaced.empty() && result.placements.size()==1,"Bottom-left lost furniture parts");
   const auto& placed=result.placements.front().sheetplacements;
   require(placed[0].id==3 && placed[0].x==0 && placed[0].y==0,"Largest part must start bottom-left");
-  require(placed[1].id==2 && placed[1].x==47 && placed[1].y==0,"Next part must use the lowest row and respect clearance");
+  require(placed[1].id==2 && std::abs(placed[1].x-46.5)<0.001 && placed[1].y==0,"Next part must use the lowest row with subpixel clearance");
   require(stats.fineFallbacks==0 && stats.candidatesExamined<500,"Bottom-left must avoid grid scans");
   valid(sheet,parts,result,cfg);
   cfg.threads=12;sameLayout(result,placePartsBitmap({sheet},parts,cfg,&stats));
@@ -384,9 +380,39 @@ void bottomLeftSearch() {
   auto failure=placePartsBitmap({sheet},{oversized},cfg,&stats);
   require(failure.unplaced.size()==1 && stats.fineFallbacks==0,"Failed contact search must return without exhaustive scans");
 }
+void fractionalHoleAndSheetMargins() {
+  auto cfg=settings();cfg.bitmapBottomLeft=true;cfg.spacing=6.5;cfg.holeSpacing=6.5;cfg.sheetSpacing=2.25;
+  auto sheet=rectangle(100,-50,80,80,99);
+  auto host=rectangle(0,0,60,60,1);host.allowedAngles={90};host.children={rectangle(20,20,20,20)};
+  std::vector<Polygon> parts{rectangle(0,0,4,4,2),host};
+  BitmapNestingStats stats;auto result=placePartsBitmap({sheet},parts,cfg,&stats);
+  require(result.unplaced.empty() && stats.vectorRefinementCompleted,"Fractional hole refinement must finish");
+  valid(sheet,parts,result,cfg);auto shapes=transformed(parts,result);
+  require(std::abs(distance(shapes[0],sheet)-2.25)<0.001,"Fractional sheet margin lost");
+  require(std::abs(distance(shapes[0].children[0],shapes[1])-6.5)<0.001,"Fractional hole margin lost");
+  require(result.placements.front().sheetplacements.front().rotation==90,"Refinement must preserve allowed orientation");
+}
+void modeSearchAndRefinement() {
+  struct Sink:EventSink {
+    void onTestStart(const std::vector<Polygon>&,const std::vector<Polygon>&,const Config&,int)override{}
+    void onProgress(int,double)override{}
+    void onResult(const PlacementResult&)override{}
+  }sink;
+  auto req=parseNestingJson(R"({"config":{"mode":"first","spacing":6.5,"threads":4,"gpu":false},"sheets":[{"width":100,"height":80}],"parts":[{"points":[[0,0],[10,0],[10,10],[0,10]]},{"points":[[0,0],[40,0],[40,30],[0,30]]}]})");
+  auto first=BackgroundOrchestrator().runWithStats(req,sink);
+  require(first.bitmapStats.fineFallbacks==0 && first.bitmapStats.trials.front().strategy=="first_bottom_left","First must select bottom-left automatically");
+  auto shapes=transformed(req.individual.placement,first.placement);
+  require(first.placement.unplaced.empty() && std::abs(distance(shapes[0],shapes[1])-6.5)<0.001,"Vector refinement must achieve fractional clearance");
+  valid(req.sheets.front(),req.individual.placement,first.placement,req.config);
+  req.config.mode=SearchMode::Timed;req.config.timeLimitSeconds=0.3;req.config.continuousRoundSeconds=0.05;
+  auto timed=runTimedNesting(req,[]{return false;});
+  require(timed.bitmapStats.searchIterations>1,"Timed mode must explore multiple restarts");
+  require(!improvesLayout(layoutQuality(req.sheets,first.placement,first.bitmapStats),layoutQuality(req.sheets,timed.placement,timed.bitmapStats)),"Timed result regressed from initial contact layout");
+  valid(req.sheets.front(),req.individual.placement,timed.placement,req.config);
+}
 int main() {
   try {
-    bottomLeftSearch();scanlines();freeRectangleProof();mixedPanelsAndMultipleSheets();duplicateContours();holesFirst();rotatedAndMultipleHoles();concavePocket();rowsAndGpuPolicy();interrupted();mixedOneAngleWorkers();repeatedInsertsAfterHoleFills();singletonWindowExpansion();timedAlternatives();gpuFailurePolicy();gpuFastPathsWhenAvailable();
+    fractionalHoleAndSheetMargins();modeSearchAndRefinement();bottomLeftSearch();scanlines();freeRectangleProof();mixedPanelsAndMultipleSheets();duplicateContours();holesFirst();rotatedAndMultipleHoles();concavePocket();rowsAndGpuPolicy();interrupted();mixedOneAngleWorkers();repeatedInsertsAfterHoleFills();singletonWindowExpansion();timedAlternatives();gpuFailurePolicy();gpuFastPathsWhenAvailable();
     std::cout<<"All nesting regression checks passed\n";return 0;
   } catch(const std::exception& e) {std::cerr<<e.what()<<"\n";return 1;}
 }
