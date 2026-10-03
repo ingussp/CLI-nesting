@@ -52,6 +52,17 @@ directory and finds the executable there or in `build-release/Release`.
 Read the console summary and the saved JSON/DXF/SVG. All relative JSON output
 paths are resolved beside the input file, even when the executable is elsewhere.
 
+Save both formats directly from the command line:
+
+```text
+clinesting.exe --input input.json --dxf result.dxf --svg result.svg
+```
+
+`--svg` enables SVG export without changing `output.svg` in the input JSON.
+Command-line output paths use the working directory and override JSON paths.
+DXF sheets appear side by side with a 20 mm gap, with their parts, holes and labels
+translated together. Continuous mode saves numbered DXF/SVG files in `results`.
+
 Examples: [complete configuration](input.json),
 [FreeCAD export](examples/freecad-input.json),
 [first layout](examples/mode-first.json),

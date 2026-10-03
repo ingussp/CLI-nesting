@@ -3,6 +3,7 @@
 #include "clinesting/geometry.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <fstream>
 #include <iomanip>
 #include <optional>
@@ -252,6 +253,9 @@ void exportPlacementResultToDxf(const std::filesystem::path& outputPath,
   if (sourceParts.empty()) {
     throw std::runtime_error("DXF export requires at least one source part polygon");
   }
+  if (!std::isfinite(options.sheetGap) || options.sheetGap < 0) {
+    throw std::invalid_argument("DXF sheet gap must be finite and non-negative");
+  }
 
   std::ofstream out(outputPath, std::ios::out | std::ios::trunc);
   if (!out.is_open()) {
@@ -262,15 +266,27 @@ void exportPlacementResultToDxf(const std::filesystem::path& outputPath,
   PlacementResolver sheetResolver(sourceSheets);
   PlacementResolver partResolver(sourceParts);
 
+  std::optional<double> nextSheetX;
+  double baselineY = 0;
   for (const auto& placedSheet : result.placements) {
     const auto& sourceSheet = sheetResolver.resolve(placedSheet, "sheet");
-    writePolyline(out, sourceSheet.points, "SHEETS");
-    writeHolesRecursive(out, sourceSheet);
+    const auto bounds = getPolygonBounds(sourceSheet.points);
+    if (!nextSheetX) {
+      nextSheetX = bounds.x;
+      baselineY = bounds.y;
+    }
+    // Preserve the first sheet's origin and align later sheets beside it.
+    const Point sheetOffset{*nextSheetX - bounds.x, baselineY - bounds.y, true};
+    const auto displayedSheet = shiftPolygon(sourceSheet, sheetOffset);
+    writePolyline(out, displayedSheet.points, "SHEETS");
+    writeHolesRecursive(out, displayedSheet);
+    *nextSheetX += bounds.width + options.sheetGap;
 
     for (const auto& partPlacement : placedSheet.sheetplacements) {
       const auto& sourcePart = partResolver.resolve(partPlacement, "part");
       Polygon transformed = rotatePolygon(sourcePart, partPlacement.rotation);
       transformed = shiftPolygon(transformed, {partPlacement.x, partPlacement.y, true});
+      transformed = shiftPolygon(transformed, sheetOffset);
 
       writePolyline(out, transformed.points, "PARTS");
       writeHolesRecursive(out, transformed);
