@@ -362,9 +362,31 @@ void mixedPanelsAndMultipleSheets() {
   require(stats.gpuBatches>0 && stats.gpuFallbackReason.empty(),"Multi-sheet GPU job did not use the GPU");
   sameLayout(cpu,gpu);
 }
+void bottomLeftSearch() {
+  auto parsed=parseNestingJson(R"({"config":{"bitmapSearch":"bottom-left"},"sheets":[{"width":100,"height":80}],"parts":[{"points":[[0,0],[10,0],[10,10],[0,10]]}]})");
+  require(parsed.config.bitmapBottomLeft,"JSON must enable bottom-left explicitly");
+  bool invalid=false;
+  try {parseNestingJson(R"({"config":{"bitmapSearch":"unknown"},"sheets":[{"width":100,"height":80}],"parts":[{"points":[[0,0],[10,0],[10,10],[0,10]]}]})");} catch(const std::invalid_argument&) {invalid=true;}
+  require(invalid,"Unknown bitmapSearch must fail validation");
+  auto cfg=settings();cfg.bitmapBottomLeft=true;cfg.spacing=6.5;cfg.holeSpacing=6.5;cfg.sheetSpacing=0;cfg.threads=1;
+  auto sheet=rectangle(0,0,100,80,99);
+  std::vector<Polygon> parts{rectangle(0,0,10,10,1),rectangle(0,0,20,20,2),rectangle(0,0,40,30,3)};
+  for(auto& p:parts)p.allowedAngles={0};
+  BitmapNestingStats stats;const auto result=placePartsBitmap({sheet},parts,cfg,&stats);
+  require(result.unplaced.empty() && result.placements.size()==1,"Bottom-left lost furniture parts");
+  const auto& placed=result.placements.front().sheetplacements;
+  require(placed[0].id==3 && placed[0].x==0 && placed[0].y==0,"Largest part must start bottom-left");
+  require(placed[1].id==2 && placed[1].x==47 && placed[1].y==0,"Next part must use the lowest row and respect clearance");
+  require(stats.fineFallbacks==0 && stats.candidatesExamined<500,"Bottom-left must avoid grid scans");
+  valid(sheet,parts,result,cfg);
+  cfg.threads=12;sameLayout(result,placePartsBitmap({sheet},parts,cfg,&stats));
+  auto oversized=rectangle(0,0,101,81,4);oversized.allowedAngles={0};
+  auto failure=placePartsBitmap({sheet},{oversized},cfg,&stats);
+  require(failure.unplaced.size()==1 && stats.fineFallbacks==0,"Failed contact search must return without exhaustive scans");
+}
 int main() {
   try {
-    scanlines();freeRectangleProof();mixedPanelsAndMultipleSheets();duplicateContours();holesFirst();rotatedAndMultipleHoles();concavePocket();rowsAndGpuPolicy();interrupted();mixedOneAngleWorkers();repeatedInsertsAfterHoleFills();singletonWindowExpansion();timedAlternatives();gpuFailurePolicy();gpuFastPathsWhenAvailable();
+    bottomLeftSearch();scanlines();freeRectangleProof();mixedPanelsAndMultipleSheets();duplicateContours();holesFirst();rotatedAndMultipleHoles();concavePocket();rowsAndGpuPolicy();interrupted();mixedOneAngleWorkers();repeatedInsertsAfterHoleFills();singletonWindowExpansion();timedAlternatives();gpuFailurePolicy();gpuFastPathsWhenAvailable();
     std::cout<<"All nesting regression checks passed\n";return 0;
   } catch(const std::exception& e) {std::cerr<<e.what()<<"\n";return 1;}
 }

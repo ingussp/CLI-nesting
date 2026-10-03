@@ -481,3 +481,23 @@ They also compare serial/parallel layouts for 1000 copies plus a singleton with 
 allowed angle. When an OpenCL GPU is available, hardware tests check fast-path use,
 CPU/GPU layout agreement and bitmap word-boundary filtering. Otherwise those
 hardware checks print a skip reason; GPU failure-policy tests still run.
+
+
+### Fast bottom-left furniture search
+
+Set `config.bitmapSearch` to `"bottom-left"` for larger parts first and contact
+positions ordered by lowest Y, then lowest X. Bitmap collisions and exact geometry
+clearance validation remain enabled. NFP contacts, pair patterns, grid scans and
+local grid refinement are skipped. Stock size, allowed angles and GPU settings remain respected.
+
+The default `"compact"` search is unchanged. Bottom-left is a heuristic and can
+miss feasible pockets, especially concave outlines and holes, leave parts unplaced
+or use more sheets. It runs one strategy per iteration; timed/continuous modes can
+still restart. Result JSON reports `bitmapSearch`.
+
+Example config: `{"mode":"first","bitmapSearch":"bottom-left","resolution":1,
+"threads":12,"spacing":6.5,"gpu":false}`.
+
+Clearance is a minimum, not a requirement that every gap is identical. Coordinates
+remain on the bitmap grid: a 6.5 mm bounding-box gap at 1 mm resolution is proposed
+as 7 mm. This change does not introduce subpixel placement.

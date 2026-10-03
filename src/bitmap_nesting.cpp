@@ -925,6 +925,7 @@ PlacementResult placePartsBitmapOnSingleSheet(const Polygon& sheet,
       const auto* m = rotationMasks[c.rotation];
       const int w = std::max(usedWidth, c.x + m->widthPx);
       const int h = std::max(usedHeight, c.y + m->heightPx);
+      if(config.bitmapBottomLeft) return {int64_t(c.y),c.x,0,0,c.rotation};
       return {int64_t(w) * h, std::max(w, h), c.x, c.y, c.rotation};
     };
     std::optional<Score> bestScore;
@@ -1030,7 +1031,7 @@ PlacementResult placePartsBitmapOnSingleSheet(const Polygon& sheet,
       maxHeight = std::max(maxHeight, m->heightPx);
     }
     bool fromPattern=false;
-    if (config.bitmapPatternTrial && exhaustedPockets[searchIdentity]<holePockets.size()) {
+    if (!config.bitmapBottomLeft && config.bitmapPatternTrial && exhaustedPockets[searchIdentity]<holePockets.size()) {
       PhaseTimer timer{localStats.phases.searchMs};
       // Try existing cavities before consuming more sheet area. Bounds only
       // propose origins; exact containment and normal clearance checks decide.
@@ -1076,7 +1077,7 @@ PlacementResult placePartsBitmapOnSingleSheet(const Polygon& sheet,
       // can become useful to a later identical copy.
       if(!fromPattern) exhaustedPockets[searchIdentity]=holePockets.size();
     }
-    if (!fromPattern && config.bitmapPatternTrial && repetitions[searchIdentity] >= 6) {
+    if (!config.bitmapBottomLeft && !fromPattern && config.bitmapPatternTrial && repetitions[searchIdentity] >= 6) {
       auto [patternIt,inserted] = patterns.try_emplace(searchIdentity);
       if (inserted) patternIt->second=makePairPattern(rotationMasks,material.widthPx,material.heightPx,config,contactNfpCache,pixels,deadline);
       auto& pattern=patternIt->second;
@@ -1152,7 +1153,7 @@ PlacementResult placePartsBitmapOnSingleSheet(const Polygon& sheet,
           propose(right - m->widthPx, top, r); propose(right, top - m->heightPx, r);
           propose(q.x - m->widthPx, q.y, r); propose(q.x, q.y - m->heightPx, r);
           // A bounded recent frontier adds interlocking proposals for concave parts.
-          if (i + 24 >= rasterPlacements.size() && r % contactStride == 0) {
+          if (!config.bitmapBottomLeft && i + 24 >= rasterPlacements.size() && r % contactStride == 0) {
             if (q.identity == identity) {
               // Compute tight pair contacts once per repeated shape/rotation pair.
               // Unlike full NFP placement, no union of all occupied NFPs is built.
@@ -1219,6 +1220,16 @@ PlacementResult placePartsBitmapOnSingleSheet(const Polygon& sheet,
       }),candidates.end());
     }
     if (!fromPattern && !exhausted.contains(searchIdentity)) {
+      if(config.bitmapBottomLeft) {
+        PhaseTimer timer{localStats.phases.searchMs};
+        std::sort(candidates.begin(),candidates.end(),[](const Candidate& a,const Candidate& b) {
+          return std::tie(a.y,a.x,a.rotation)<std::tie(b.y,b.x,b.rotation);
+        });
+        for(size_t i=0;i<candidates.size() && !bestScore;i+=validationBatch)
+          evaluateBatch(std::span<const Candidate>(candidates).subspan(i,std::min(validationBatch,candidates.size()-i)),true);
+        // No grid fallback: a failed shortlist does not prove that the shape
+        // cannot fit. Later placements can create new contact candidates.
+      } else {
       auto rank = [](const Candidate& a, const Candidate& b) {
         return std::tie(a.area,a.extent,a.x,a.y,a.rotation) < std::tie(b.area,b.extent,b.x,b.y,b.rotation);
       };
@@ -1348,6 +1359,7 @@ PlacementResult placePartsBitmapOnSingleSheet(const Polygon& sheet,
         }
       } else {
         if (searchStep == 1) exhausted.insert(searchIdentity);
+      }
       }
     } else if (!fromPattern) {
       ++localStats.exhaustedShapeSkips;
@@ -1521,7 +1533,7 @@ PlacementResult placePartsBitmap(const std::vector<Polygon>& sheets,
 
   const auto start=std::chrono::steady_clock::now();
   const bool hasHoles=std::any_of(parts.begin(),parts.end(),[](const Polygon& p) { return !p.children.empty(); });
-  const int trialCount=parts.size()<6 && !hasHoles ? 1 : std::clamp(config.bitmapTrials,1,4);
+  const int trialCount=config.bitmapBottomLeft || (parts.size()<6 && !hasHoles) ? 1 : std::clamp(config.bitmapTrials,1,4);
   const int workerCount=std::min(trialCount,normalizeWorkerCount(config.threads));
   const int helpersPerTrial=std::max(1,normalizeWorkerCount(config.threads)/workerCount);
   // Keep one independently executed strategy's result and diagnostics.
@@ -1549,7 +1561,11 @@ PlacementResult placePartsBitmap(const std::vector<Polygon>& sheets,
         } else if (i>=2) std::stable_sort(remaining.begin(),remaining.end(),[&](const Polygon& a,const Polygon& b) {
           return i==2 ? polygonMaterialArea(a)>polygonMaterialArea(b) : polygonMaterialArea(a)<polygonMaterialArea(b);
         });
-        if(cfg.bitmapPatternTrial) {
+        if(cfg.bitmapBottomLeft) {
+          std::stable_sort(remaining.begin(),remaining.end(),[](const Polygon& a,const Polygon& b) {
+            return polygonMaterialArea(a)>polygonMaterialArea(b);
+          });
+        } else if(cfg.bitmapPatternTrial) {
           auto largestHole=[](const Polygon& p) {
             double area=0;
             for(const auto& hole:p.children) area=std::max(area,std::abs(polygonArea(hole)));

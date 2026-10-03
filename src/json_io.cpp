@@ -139,6 +139,11 @@ void configure(const Json& j,Config& c) {
   for(auto it=j.begin();it!=j.end();++it) {
     const auto& k=it.key(); const auto& v=it.value();
     if(k=="threads") c.threads=integer(v,k,1,256);
+    else if(k=="bitmapSearch") {
+      if(v=="compact") c.bitmapBottomLeft=false;
+      else if(v=="bottom-left") c.bitmapBottomLeft=true;
+      else throw std::invalid_argument("bitmapSearch must be compact or bottom-left");
+    }
     else if(k=="trials") c.bitmapTrials=integer(v,k,1,4);
     else if(k=="mode") {
       if(v=="first") c.mode=SearchMode::First;
@@ -323,6 +328,7 @@ void writeNestingJson(const std::filesystem::path& path,const BackgroundRequest&
     {"patternPlacements",run.bitmapStats.patternPlacements},{"rejectedPositionSkips",run.bitmapStats.rejectedPositionSkips},
     {"holePlacements",run.bitmapStats.holePlacements},
     {"sheets",Json::array()},{"unplaced",Json::array()}};
+  out["bitmapSearch"]=input.config.bitmapBottomLeft ? "bottom-left" : "compact";
   out["selectedTrial"]=run.bitmapStats.selectedTrial;
   out["clearances"]={{"spacing",input.config.spacing},{"partToSheet",input.config.sheetSpacing},
                      {"partToHole",input.config.holeSpacing}};
