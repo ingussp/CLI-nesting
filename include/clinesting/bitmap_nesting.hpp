@@ -16,6 +16,9 @@ struct BitmapNestingStats {
   std::string gpuFallbackReason;
   size_t gpuCandidates{0};
   size_t gpuBatches{0};
+  size_t vectorMoves{0},vectorChecks{0},searchIterations{0};
+  double vectorRefinementMs{0};
+  bool vectorRefinementCompleted{false};
   size_t cachedMaskCount{0};
   size_t acceptedPlacements{0};
   size_t processedParts{0};

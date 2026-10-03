@@ -83,6 +83,7 @@ struct Config {
   int bitmapSearchStepPx{1};
   bool bitmapPreferAvx2{true};
   bool bitmapValidateGeometry{true};
+  bool bitmapBottomLeft{false}; // Contact-only heuristic; no exhaustive grid fallback.
   bool debugPlacement{false};
   double spacing{0.0};
   double sheetSpacing{0.0};

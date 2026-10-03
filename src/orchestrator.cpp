@@ -2,6 +2,7 @@
 #include "clinesting/orchestrator.hpp"
 
 #include <chrono>
+#include <algorithm>
 #include <vector>
 
 namespace clinesting {
@@ -16,6 +17,8 @@ OrchestratorRunStats BackgroundOrchestrator::runWithStats(BackgroundRequest data
                                                         const BitmapLayoutCallback& onLayout) {
   const auto t0 = std::chrono::steady_clock::now();
   OrchestratorRunStats runStats;
+  data.config.bitmapBottomLeft=data.config.mode==SearchMode::First;
+  if(data.config.mode!=SearchMode::First) data.config.bitmapTrials=std::max(2,data.config.bitmapTrials);
   auto parts = data.individual.placement;
   for (size_t i = 0; i < parts.size(); ++i) {
     if (i < data.individual.rotation.size()) {
