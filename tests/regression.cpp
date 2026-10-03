@@ -380,6 +380,24 @@ void bottomLeftSearch() {
   auto failure=placePartsBitmap({sheet},{oversized},cfg,&stats);
   require(failure.unplaced.size()==1 && stats.fineFallbacks==0,"Failed contact search must return without exhaustive scans");
 }
+void stockObstaclesInBottomLeftSearch() {
+  auto cfg=settings();cfg.bitmapBottomLeft=true;cfg.spacing=6.1;cfg.holeSpacing=6.1;cfg.sheetSpacing=2.25;
+  auto sheet=rectangle(125,-250,2000,2800,99);
+  // A hole blocks the only original seed for the longest panel. The clear
+  // right-hand strip must remain searchable even before any part is placed.
+  sheet.children={rectangle(125+260,-250+2126,168,168),
+                  rectangle(125+433,-250+774,198,198),
+                  rectangle(125+1138,-250+268,293,293)};
+  std::vector<Polygon> parts{rectangle(0,0,350,2234,1),rectangle(0,0,350,1800,2),
+                             rectangle(0,0,350,1800,3)};
+  BitmapNestingStats stats;
+  const auto result=placePartsBitmap({sheet},parts,cfg,&stats);
+  require(result.unplaced.empty(),"Sheet cutouts must not hide clear strips from bottom-left search");
+  require(result.placements.size()==1,"Panels should share the perforated sheet");
+  require(stats.fineFallbacks==0 && stats.candidatesExamined<2000,"Obstacle contacts must avoid grid scans");
+  valid(sheet,parts,result,cfg);
+  cfg.threads=12;sameLayout(result,placePartsBitmap({sheet},parts,cfg,&stats));
+}
 void fractionalHoleAndSheetMargins() {
   auto cfg=settings();cfg.bitmapBottomLeft=true;cfg.spacing=6.5;cfg.holeSpacing=6.5;cfg.sheetSpacing=2.25;
   auto sheet=rectangle(100,-50,80,80,99);
@@ -412,7 +430,7 @@ void modeSearchAndRefinement() {
 }
 int main() {
   try {
-    fractionalHoleAndSheetMargins();modeSearchAndRefinement();bottomLeftSearch();scanlines();freeRectangleProof();mixedPanelsAndMultipleSheets();duplicateContours();holesFirst();rotatedAndMultipleHoles();concavePocket();rowsAndGpuPolicy();interrupted();mixedOneAngleWorkers();repeatedInsertsAfterHoleFills();singletonWindowExpansion();timedAlternatives();gpuFailurePolicy();gpuFastPathsWhenAvailable();
+    stockObstaclesInBottomLeftSearch();fractionalHoleAndSheetMargins();modeSearchAndRefinement();bottomLeftSearch();scanlines();freeRectangleProof();mixedPanelsAndMultipleSheets();duplicateContours();holesFirst();rotatedAndMultipleHoles();concavePocket();rowsAndGpuPolicy();interrupted();mixedOneAngleWorkers();repeatedInsertsAfterHoleFills();singletonWindowExpansion();timedAlternatives();gpuFailurePolicy();gpuFastPathsWhenAvailable();
     std::cout<<"All nesting regression checks passed\n";return 0;
   } catch(const std::exception& e) {std::cerr<<e.what()<<"\n";return 1;}
 }
