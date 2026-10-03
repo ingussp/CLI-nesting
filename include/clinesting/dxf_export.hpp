@@ -12,6 +12,7 @@ namespace clinesting {
 struct DxfExportOptions {
   bool includeLabels{true};
   double labelHeight{1.0};
+  double sheetGap{20.0};
 };
 
 // Resolves placements against source polygons by preferring (source + id), then id-only, then source-only

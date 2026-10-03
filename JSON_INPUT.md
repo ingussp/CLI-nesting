@@ -83,9 +83,17 @@ searchIteration, timingMs, holePlacements and GPU diagnostics. Timed GPU counter
 restarts; continuous snapshots report the candidate strategy. stopReason in a
 continuous snapshot describes that candidate, not completion of the entire session.
 
-Optional legacy CLI overrides remain: --output, --dxf, --threads, --trials.
+Optional CLI overrides: --output, --dxf, --svg, --threads, --trials.
 Their paths resolve against the working directory. --output layout.dxf writes real
-DXF plus layout.json. Input/output collisions, including aliases of existing files,
+DXF plus layout.json. `--svg result.svg` enables SVG output without setting
+`output.svg` in JSON and overrides any JSON SVG path. It can be combined with
+`--dxf result.dxf`. In continuous mode these flags enable matching
+`results/resultN.dxf` and `results/resultN.svg` history files.
+DXF sheets are arranged horizontally with a 20 mm gap; sheet boundaries, sheet
+holes, parts, part holes and labels move together. The first sheet keeps its
+original origin, and later sheets align with its bottom edge. JSON placements
+keep their original sheet coordinates.
+Input/output collisions, including aliases of existing files,
 are rejected.
 
 ## Dependencies

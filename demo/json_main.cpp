@@ -129,7 +129,7 @@ int main(int argc,char** argv) {
   try {
     namespace fs=std::filesystem;
     fs::path input="input.json";
-    std::optional<fs::path> outputOverride,dxfOverride;
+    std::optional<fs::path> outputOverride,dxfOverride,svgOverride;
     std::optional<int> threads,trials;
     for(int i=1;i<argc;++i) {
       const std::string arg=argv[i];
@@ -146,7 +146,7 @@ int main(int argc,char** argv) {
           <<"continuous: optimize until Ctrl+C or console close; clear results next to input and save resultN files.\n"
           <<"output.cancelFile is an optional cooperative cancellation marker.\n"
           <<"JSON output paths are relative to input.json. --list-gpus lists OpenCL devices.\n"
-          <<"Legacy overrides: --output result.json --dxf result.dxf --threads N --trials 1..4.\n";
+          <<"Overrides: --output result.json --dxf result.dxf --svg result.svg --threads N --trials 1..4.\n";
         return 0;
       }
       if(i+1>=argc) throw std::invalid_argument("Missing value for "+arg);
@@ -154,6 +154,7 @@ int main(int argc,char** argv) {
       if(arg=="--input") input=fs::u8path(value);
       else if(arg=="--output") outputOverride=fs::u8path(value);
       else if(arg=="--dxf") dxfOverride=fs::u8path(value);
+      else if(arg=="--svg") svgOverride=fs::u8path(value);
       else if(arg=="--threads") threads=positive(value,256,"threads");
       else if(arg=="--trials") trials=positive(value,4,"trials");
       else throw std::invalid_argument("Unknown argument: "+arg);
@@ -165,9 +166,9 @@ int main(int argc,char** argv) {
     if(trials) request.config.bitmapTrials=*trials;
     const auto resolve=[&](const std::string& value) { return base/fs::u8path(value); };
     fs::path output=outputOverride.value_or(resolve(request.output.json));
-    std::optional<fs::path> dxf=dxfOverride,svg;
+    std::optional<fs::path> dxf=dxfOverride,svg=svgOverride;
     if(!dxf && !request.output.dxf.empty()) dxf=resolve(request.output.dxf);
-    if(!request.output.svg.empty()) svg=resolve(request.output.svg);
+    if(!svg && !request.output.svg.empty()) svg=resolve(request.output.svg);
     auto extension=output.extension().string();
     std::transform(extension.begin(),extension.end(),extension.begin(),[](unsigned char c) { return char(std::tolower(c)); });
     if(extension==".dxf") {
