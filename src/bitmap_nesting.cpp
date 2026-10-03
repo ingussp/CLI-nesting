@@ -809,6 +809,8 @@ PlacementResult placePartsBitmapOnSingleSheet(const Polygon& sheet,
   BitmapGrid occupancy = makeBitmapGrid(material.widthPx, material.heightPx);
   detail::FreeRectangles freeRectangles(material.widthPx,material.heightPx);
   detail::FreeRectangles clearanceRectangles(material.widthPx,material.heightPx);
+  std::vector<Bounds> sheetHoleBounds;
+  for(const auto& hole:sheet.children) sheetHoleBounds.push_back(getPolygonBounds(hole.points));
 
   // Heap-own masks so pointers in rotationMasks/rasterPlacements stay valid
   // even when the lookup table grows to thousands of requested angles.
@@ -1216,7 +1218,25 @@ PlacementResult placePartsBitmapOnSingleSheet(const Polygon& sheet,
         const double maxGap=double(std::max(material.widthPx,material.heightPx))+1;
         const int edgeGap=static_cast<int>(std::min(maxGap,std::ceil(config.sheetSpacing/config.bitmapResolutionMm)));
         const int partGap=static_cast<int>(std::min(maxGap,std::ceil(config.spacing/config.bitmapResolutionMm)));
-        if(tile==0) propose(edgeGap, edgeGap, r);
+        if(tile==0) {
+          const int farX=material.widthPx-m->widthPx-edgeGap;
+          const int farY=material.heightPx-m->heightPx-edgeGap;
+          propose(edgeGap,edgeGap,r);
+          propose(farX,edgeGap,r); propose(edgeGap,farY,r); propose(farX,farY,r);
+          // Stock cutouts can block every part-to-part contact while leaving
+          // entire strips free. Seed the strips beside their bounds directly;
+          // all proposals still pass bitmap and exact clearance validation.
+          const double holeGap=std::min(maxGap,config.holeSpacing/config.bitmapResolutionMm);
+          auto pixel=[&](double value) { return int(std::clamp(value,-maxGap,maxGap)); };
+          for(const auto& hole:sheetHoleBounds) {
+            const int left=pixel(std::floor((hole.x-sheetBounds.x)/config.bitmapResolutionMm-holeGap))-m->widthPx;
+            const int right=pixel(std::ceil((hole.x+hole.width-sheetBounds.x)/config.bitmapResolutionMm+holeGap));
+            const int bottom=pixel(std::floor((hole.y-sheetBounds.y)/config.bitmapResolutionMm-holeGap))-m->heightPx;
+            const int top=pixel(std::ceil((hole.y+hole.height-sheetBounds.y)/config.bitmapResolutionMm+holeGap));
+            for(int x:{left,right}) { propose(x,edgeGap,r); propose(x,farY,r); }
+            for(int y:{bottom,top}) { propose(edgeGap,y,r); propose(farX,y,r); }
+          }
+        }
         const size_t frontierCount=rasterPlacements.size()-frontierStart;
         for (size_t i = frontierStart+frontierCount*tile/tiles; i < frontierStart+frontierCount*(tile+1)/tiles; ++i) {
           const auto& q = rasterPlacements[i];
