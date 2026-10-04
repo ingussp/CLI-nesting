@@ -7,6 +7,8 @@
 #include "search_deadline.hpp"
 #include "raster_scanline.hpp"
 #include "free_rectangles.hpp"
+#include "clearance_index.hpp"
+#include "convex_pair_cache.hpp"
 #include <random>
 
 #include <algorithm>
@@ -140,12 +142,28 @@ void refineVectors(const std::vector<Polygon>& sheets,const std::vector<Polygon>
     const auto sb=getPolygonBounds(sheet->points);
     SpatialIndex index(std::max(16.0,std::max(sb.width,sb.height)/32.0));
     std::vector<Polygon> absolute;
+    detail::ConvexPairCache pairCache;
+    std::vector<size_t> pairShapes;
+    double coordinateScale=std::max({1.0,std::abs(sb.x),std::abs(sb.y),sb.width,sb.height});
     for(const auto& placement:layout.sheetplacements) {
       auto it=byId.find(placement.id.value_or(-1));
       if(it==byId.end()) throw std::runtime_error("Unknown part in vector refinement");
-      absolute.push_back(shiftPolygon(rotatePolygon(*it->second,placement.rotation),{placement.x,placement.y,true}));
+      const auto rotated=rotatePolygon(*it->second,placement.rotation);
+      pairShapes.push_back(pairCache.add(rotated));
+      absolute.push_back(shiftPolygon(rotated,{placement.x,placement.y,true}));
+      for(const auto& pt:rotated.points) coordinateScale=std::max({coordinateScale,std::abs(pt.x),std::abs(pt.y)});
+      coordinateScale=std::max({coordinateScale,std::abs(placement.x),std::abs(placement.y)});
       index.insert(getPolygonBounds(absolute.back().points),absolute.size()-1);
     }
+    // Conservative band covers Clipper quantization and translation rounding.
+    // Within the band, retain the unchanged exact predicate.
+    const double pairGuard=std::max({1e-5,4.0/cfg.clipperScale,
+        coordinateScale*128*std::numeric_limits<double>::epsilon()});
+    const detail::ClearanceIndex sheetEdges(*sheet);
+    const detail::RectangularSheetClearance sheetRectangle(*sheet);
+    std::vector<detail::ClearanceIndex> partEdges;
+    partEdges.reserve(absolute.size());
+    for(const auto& p:absolute) partEdges.emplace_back(p);
     for(int pass=0;pass<3 && !stopped;++pass) {
       bool moved=false;
       for(size_t i=0;i<absolute.size() && !stopped;++i) for(int axis:{1,0}) {
@@ -157,14 +175,21 @@ void refineVectors(const std::vector<Polygon>& sheets,const std::vector<Polygon>
         auto validShift=[&](double amount) {
           if(deadline.expired()) {stopped=true;return false;}
           ++stats.vectorChecks;
-          auto candidate=shiftPolygon(absolute[i],{axis?0:-amount,axis?-amount:0,true});
-          if(violatesSheetClearance(candidate,*sheet,cfg)) return false;
+          const Point shift{axis?0:-amount,axis?-amount:0,true};
+          auto candidate=shiftPolygon(absolute[i],shift);
           auto b=getPolygonBounds(candidate.points);
+          const auto stockCheck=sheetRectangle.violation(b,cfg.sheetSpacing,pairGuard);
+          if(stockCheck) {if(*stockCheck) return false;}
+          else if(partEdges[i].sheetViolation(candidate,*sheet,sheetEdges,shift,cfg)) return false;
           const double gap=std::max(cfg.spacing,cfg.holeSpacing);
           b.x-=gap;b.y-=gap;b.width+=2*gap;b.height+=2*gap;
           for(auto j:index.query(b)) if(j!=i) {
             if(deadline.expired()) {stopped=true;return false;}
-            if(violatesPartClearance(candidate,absolute[j],cfg)) return false;
+            const auto& other=layout.sheetplacements[j];
+            const Point relative{other.x-(placement.x+shift.x),other.y-(placement.y+shift.y),true};
+            const auto quick=pairCache.violation(pairShapes[i],pairShapes[j],relative,cfg.spacing,pairGuard);
+            if(quick) {if(*quick) return false;}
+            else if(partEdges[i].partViolation(candidate,absolute[j],partEdges[j],shift,cfg)) return false;
           }
           return true;
         };
@@ -180,6 +205,7 @@ void refineVectors(const std::vector<Polygon>& sheets,const std::vector<Polygon>
         }
         if(low>tolerance) {
           absolute[i]=shiftPolygon(absolute[i],{axis?0:-low,axis?-low:0,true});
+          partEdges[i]=detail::ClearanceIndex(absolute[i]);
           if(axis) placement.y-=low;else placement.x-=low;
           // Stale bin entries are conservative; query deduplication and exact
           // geometry validation ensure they cannot cause a missed neighbour.
