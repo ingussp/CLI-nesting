@@ -22,6 +22,8 @@ Run `clinesting.exe` with all settings in `input.json`, or use
 `continuousRoundSeconds` (default 30) bounds each optimization restart. It is not
 a total session limit. In timed mode each restart also respects the remaining global
 budget. In continuous mode `timeLimitSeconds` is ignored.
+The initial fast layout receives at most 20% of a timed job's total budget,
+capped by `continuousRoundSeconds`, so a slow seed leaves time for other strategies.
 Cancellation is cooperative; in-flight GPU/geometry calls and file output can add time.
 Windows console close has an OS-imposed grace period; previous completed files survive.
 
@@ -71,6 +73,21 @@ Output `cpuWorkersUsed` reports the allocated CPU pool and `candidateWorkersUsed
 reports actual parallel geometry-check participation. `gpu.used`, `batches` and
 `fallbackReason` distinguish successful GPU work from CPU fallback. Hardware
 startup can outweigh search time on small jobs.
+
+`config.cacheMemoryMiB` defaults to 256 (integer 1..4096). It caps accounted
+rejection-cache memory shared by concurrent strategies, rather than reserving that
+amount for every strategy. The cache allocates only touched 4096-position pages;
+accounting includes page storage and a map-overhead allowance, not total process
+memory. A full cache simply stops recording new pages; normal validation continues.
+`cacheRejects: false` disables both rejection pages and failed-contact-search reuse.
+Failed contact searches are reusable only for identical geometry/rotation policies
+while the sheet occupancy remains unchanged. GPU prefilter batches use `gpu.batchSize`
+while ordered CPU geometry checks retain small chunks.
+
+Output `rejectionCache` reports `budgetMiB` and `peakAccountedBytes`;
+`failedSearchSkips` counts reused failed contact searches in the selected layout.
+`totalStartedTrials` counts strategies across all timed restarts. Timed worker
+counts report the maximum across restarts, not sustained CPU utilisation.
 
 The optimization objective is lexicographic: fewer unplaced instances, then smaller
 unused material area in used sheets, then smaller unused area in occupied bounding

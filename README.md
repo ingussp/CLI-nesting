@@ -238,6 +238,7 @@ These keys are accepted in settings, config or CLI-nesting.
 | `bitmapSearchStepPx` | Alias of step | Same range; prefer one spelling. If both exist, step wins |
 | `curveTolerance` | 0.3 mm | 0..1000000; contact-proposal contour simplification tolerance. Smaller retains more detail and costs more work. Original validation/export points remain intact; this does not import DXF curves |
 | `cacheRejects` | true | Boolean; remembers failed raster origins while occupancy grows. False reduces cache memory at the cost of repeated checks |
+| `cacheMemoryMiB` | 256 | Integer 1..4096; shared rejection-page budget across concurrent strategies; unused pages are not allocated |
 | `spacing` | 0 mm | Outer-boundary gap between parts |
 | `partToSheet` | 0 mm | Margin to the stock outline |
 | `partToHole` | 0 mm | Margin involving hole edges |
@@ -445,7 +446,9 @@ means input, calculation or file failure. Forced OS termination may use another 
 - Restrict angles when possible. A 0.1-degree grid substantially increases work
   and does not improve translation resolution.
 - Finer rasters use more memory. Raster allocation is capped; pixel caches use
-  about 64 MiB per strategy/sheet and rejected origins up to 32 MiB. Geometry and
+  about 64 MiB per strategy/sheet. Rejected origins use sparse pages with a shared
+  default 256 MiB accounting budget (`cacheMemoryMiB`), including an allowance for
+  map overhead. Reaching the budget skips new cache entries, not validation. Geometry and
   other state need additional memory. GPU masks are limited to 512 MiB and the
   device allocation limit.
 - Large gaps or small stock may prevent every placement. Check unplacedCount;

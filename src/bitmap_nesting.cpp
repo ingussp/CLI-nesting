@@ -7,6 +7,9 @@
 #include "search_deadline.hpp"
 #include "raster_scanline.hpp"
 #include "free_rectangles.hpp"
+#include "clearance_index.hpp"
+#include "convex_pair_cache.hpp"
+#include "rejection_cache.hpp"
 #include <random>
 
 #include <algorithm>
@@ -140,12 +143,28 @@ void refineVectors(const std::vector<Polygon>& sheets,const std::vector<Polygon>
     const auto sb=getPolygonBounds(sheet->points);
     SpatialIndex index(std::max(16.0,std::max(sb.width,sb.height)/32.0));
     std::vector<Polygon> absolute;
+    detail::ConvexPairCache pairCache;
+    std::vector<size_t> pairShapes;
+    double coordinateScale=std::max({1.0,std::abs(sb.x),std::abs(sb.y),sb.width,sb.height});
     for(const auto& placement:layout.sheetplacements) {
       auto it=byId.find(placement.id.value_or(-1));
       if(it==byId.end()) throw std::runtime_error("Unknown part in vector refinement");
-      absolute.push_back(shiftPolygon(rotatePolygon(*it->second,placement.rotation),{placement.x,placement.y,true}));
+      const auto rotated=rotatePolygon(*it->second,placement.rotation);
+      pairShapes.push_back(pairCache.add(rotated));
+      absolute.push_back(shiftPolygon(rotated,{placement.x,placement.y,true}));
+      for(const auto& pt:rotated.points) coordinateScale=std::max({coordinateScale,std::abs(pt.x),std::abs(pt.y)});
+      coordinateScale=std::max({coordinateScale,std::abs(placement.x),std::abs(placement.y)});
       index.insert(getPolygonBounds(absolute.back().points),absolute.size()-1);
     }
+    // Conservative band covers Clipper quantization and translation rounding.
+    // Within the band, retain the unchanged exact predicate.
+    const double pairGuard=std::max({1e-5,4.0/cfg.clipperScale,
+        coordinateScale*128*std::numeric_limits<double>::epsilon()});
+    const detail::ClearanceIndex sheetEdges(*sheet);
+    const detail::RectangularSheetClearance sheetRectangle(*sheet);
+    std::vector<detail::ClearanceIndex> partEdges;
+    partEdges.reserve(absolute.size());
+    for(const auto& p:absolute) partEdges.emplace_back(p);
     for(int pass=0;pass<3 && !stopped;++pass) {
       bool moved=false;
       for(size_t i=0;i<absolute.size() && !stopped;++i) for(int axis:{1,0}) {
@@ -157,14 +176,21 @@ void refineVectors(const std::vector<Polygon>& sheets,const std::vector<Polygon>
         auto validShift=[&](double amount) {
           if(deadline.expired()) {stopped=true;return false;}
           ++stats.vectorChecks;
-          auto candidate=shiftPolygon(absolute[i],{axis?0:-amount,axis?-amount:0,true});
-          if(violatesSheetClearance(candidate,*sheet,cfg)) return false;
+          const Point shift{axis?0:-amount,axis?-amount:0,true};
+          auto candidate=shiftPolygon(absolute[i],shift);
           auto b=getPolygonBounds(candidate.points);
+          const auto stockCheck=sheetRectangle.violation(b,cfg.sheetSpacing,pairGuard);
+          if(stockCheck) {if(*stockCheck) return false;}
+          else if(partEdges[i].sheetViolation(candidate,*sheet,sheetEdges,shift,cfg)) return false;
           const double gap=std::max(cfg.spacing,cfg.holeSpacing);
           b.x-=gap;b.y-=gap;b.width+=2*gap;b.height+=2*gap;
           for(auto j:index.query(b)) if(j!=i) {
             if(deadline.expired()) {stopped=true;return false;}
-            if(violatesPartClearance(candidate,absolute[j],cfg)) return false;
+            const auto& other=layout.sheetplacements[j];
+            const Point relative{other.x-(placement.x+shift.x),other.y-(placement.y+shift.y),true};
+            const auto quick=pairCache.violation(pairShapes[i],pairShapes[j],relative,cfg.spacing,pairGuard);
+            if(quick) {if(*quick) return false;}
+            else if(partEdges[i].partViolation(candidate,absolute[j],partEdges[j],shift,cfg)) return false;
           }
           return true;
         };
@@ -180,6 +206,7 @@ void refineVectors(const std::vector<Polygon>& sheets,const std::vector<Polygon>
         }
         if(low>tolerance) {
           absolute[i]=shiftPolygon(absolute[i],{axis?0:-low,axis?-low:0,true});
+          partEdges[i]=detail::ClearanceIndex(absolute[i]);
           if(axis) placement.y-=low;else placement.x-=low;
           // Stale bin entries are conservative; query deduplication and exact
           // geometry validation ensure they cannot cause a missed neighbour.
@@ -214,34 +241,7 @@ struct Candidate {
   const Polygon* pocket{nullptr};
 };
 
-// Failed origins remain invalid while occupancy only grows. Each strategy/sheet
-// owns its cache; no bitmap or cached failure is shared between worker threads.
-struct RejectedOrigins {
-  uint64_t rows{0}, rotations{0}, size{0};
-  std::vector<uint64_t> bits;
-  // Flatten an origin and rotation into the rejected-position bitmap.
-  uint64_t index(int x, int y, size_t r) const {
-    return (uint64_t(x) * rows + uint64_t(y)) * rotations + r;
-  }
-  // Check whether a rejected-origin bit is already set.
-  bool contains(uint64_t i) const {
-    return !bits.empty() && i < size && (bits[i / 64] & (uint64_t(1) << (i % 64)));
-  }
-  // Add an entry to the current spatial or rejected-origin index.
-  void insert(uint64_t i) {
-    if (!bits.empty() && i < size) bits[i / 64] |= uint64_t(1) << (i % 64);
-  }
-  // Advance to the next available cached origin or pattern position.
-  uint64_t next(uint64_t i) const {
-    if (bits.empty()) return i;
-    while (i < size) {
-      const uint64_t available = ~bits[i / 64] & (~uint64_t(0) << (i % 64));
-      if (available) return std::min(size, (i / 64) * 64 + std::countr_zero(available));
-      i = (i / 64 + 1) * 64;
-    }
-    return size;
-  }
-};
+using detail::RejectedOrigins;
 
 // Check whether two axis-aligned bounds overlap with positive extent.
 bool boundsIntersect(const Bounds& a, const Bounds& b) {
@@ -787,6 +787,7 @@ PlacementResult placePartsBitmapOnSingleSheet(const Polygon& sheet,
                                               const std::vector<Polygon>& parts,
                                               const Config& config,
                                               ParallelLoop& parallel,
+                                              detail::RejectionCacheBudget& rejectionBudget,
                                               std::unique_ptr<GpuBitmap>& gpu,
                                               const SearchDeadline& deadline,
                                               bool useAvx2,
@@ -833,9 +834,9 @@ PlacementResult placePartsBitmapOnSingleSheet(const Polygon& sheet,
   std::vector<RasterPlacement> rasterPlacements;
   std::unordered_map<std::string, std::vector<RasterPlacement>> repeated;
   std::unordered_set<std::string> exhausted;
+  std::unordered_map<std::string,size_t> failedContactVersions;
   std::unordered_map<std::string, uint64_t> fineSearchCursor;
   std::unordered_map<std::string, RejectedOrigins> rejectedOrigins;
-  size_t rejectedCacheBytes = 0;
   std::unordered_map<std::string, size_t> repetitions;
   std::unordered_map<std::string, PairPattern> patterns;
   if (config.bitmapPatternTrial)
@@ -875,10 +876,14 @@ PlacementResult placePartsBitmapOnSingleSheet(const Polygon& sheet,
     Polygon acceptedAbsolute;
     Bounds acceptedBounds;
     const std::string identity = polygonGeometryIdentity(part);
+    const std::string searchIdentity = searchPolicyKey(part);
     try {
+    const auto failed=failedContactVersions.find(searchIdentity);
+    if(config.bitmapBottomLeft && config.bitmapCacheRejects && failed!=failedContactVersions.end() && failed->second==placedCount) {
+      ++localStats.failedSearchSkips;
+    } else {
 
     const int rotationCount = int(part.allowedAngles.size());
-    const std::string searchIdentity = searchPolicyKey(part);
     auto [rotationIt,newRotations]=rotationCache.try_emplace(searchIdentity);
     auto& rotationMasks=rotationIt->second;
     if(newRotations) {
@@ -990,12 +995,7 @@ PlacementResult placePartsBitmapOnSingleSheet(const Polygon& sheet,
       rejected.rows = uint64_t(globalMaxOriginY) + 1;
       rejected.rotations = rotationMasks.size();
       rejected.size = (uint64_t(globalMaxOriginX) + 1) * rejected.rows * rejected.rotations;
-      const uint64_t bytes = ((rejected.size + 63) / 64) * sizeof(uint64_t);
-      constexpr size_t budget = 32ULL * 1024 * 1024;
-      if (config.bitmapCacheRejects && bytes <= budget - rejectedCacheBytes) {
-        rejected.bits.assign(size_t((rejected.size + 63) / 64), 0);
-        rejectedCacheBytes += size_t(bytes);
-      }
+      rejected.configure(config.bitmapCacheRejects ? &rejectionBudget : nullptr);
     }
     using Score = std::tuple<int64_t, int, int, int, size_t>;
     auto score = [&](const Candidate& c) -> Score {
@@ -1100,7 +1100,24 @@ PlacementResult placePartsBitmapOnSingleSheet(const Polygon& sheet,
       if(interrupted) throw SearchTimeExpired{};
       return selected;
     };
-    const size_t validationBatch=std::min<size_t>(config.gpuBatchSize,64);
+    const size_t validationBatch=64;
+    // Keep the GPU busy with a large immutable occupancy snapshot, but retain
+    // CPU validation order and small exact-geometry chunks. No placement is
+    // committed until this ordered search returns.
+    auto evaluateOrdered = [&](std::span<const Candidate> ordered,bool first) {
+      const size_t uploadBatch=gpuAvailable ? size_t(config.gpuBatchSize) : validationBatch;
+      for(size_t offset=0;offset<ordered.size();offset+=uploadBatch) {
+        deadline.check();
+        const auto chunk=ordered.subspan(offset,std::min(uploadBatch,ordered.size()-offset));
+        const auto flags=gpuAvailable ? gpuCandidates(chunk) : std::optional<std::vector<uint8_t>>{};
+        for(size_t i=0;i<chunk.size();i+=validationBatch) {
+          const auto group=chunk.subspan(i,std::min(validationBatch,chunk.size()-i));
+          const auto allowed=flags ? std::span<const uint8_t>(*flags).subspan(i,group.size()) : std::span<const uint8_t>{};
+          if(evaluateBatch(group,first,allowed,bool(flags),false) && first) return true;
+        }
+      }
+      return false;
+    };
 
     int maxWidth = 1, maxHeight = 1;
     for (const auto* m : rotationMasks) {
@@ -1320,8 +1337,7 @@ PlacementResult placePartsBitmapOnSingleSheet(const Polygon& sheet,
         std::sort(candidates.begin(),candidates.end(),[](const Candidate& a,const Candidate& b) {
           return std::tie(a.y,a.x,a.rotation)<std::tie(b.y,b.x,b.rotation);
         });
-        for(size_t i=0;i<candidates.size() && !bestScore;i+=validationBatch)
-          evaluateBatch(std::span<const Candidate>(candidates).subspan(i,std::min(validationBatch,candidates.size()-i)),true);
+        evaluateOrdered(candidates,true);
         // No grid fallback: a failed shortlist does not prove that the shape
         // cannot fit. Later placements can create new contact candidates.
       } else {
@@ -1346,8 +1362,7 @@ PlacementResult placePartsBitmapOnSingleSheet(const Polygon& sheet,
         const auto limit = std::min<size_t>(8192, inWindow.size());
         if(limit<inWindow.size()) std::nth_element(inWindow.begin(),inWindow.begin()+limit,inWindow.end(),rank);
         std::sort(inWindow.begin(),inWindow.begin()+limit,rank);
-        for(size_t i=0;i<limit && !bestScore;i+=validationBatch)
-          evaluateBatch(std::span<const Candidate>(inWindow).subspan(i,std::min(validationBatch,limit-i)),true);
+        evaluateOrdered(std::span<const Candidate>(inWindow).first(limit),true);
         if (!bestScore) {
           // GPU and CPU share the same deterministic grid order and validation.
           const int coarse = std::max(searchStep, static_cast<int>(std::ceil(
@@ -1445,9 +1460,9 @@ PlacementResult placePartsBitmapOnSingleSheet(const Polygon& sheet,
               for (int dy : {-step, 0, step})
                 for (size_t r = 0; r < rotationMasks.size(); ++r) {
                   batch.push_back({startX+dx,startY+dy,r});
-                  if(batch.size()==validationBatch) { evaluateBatch(batch,false); batch.clear(); }
+                  if(batch.size()==size_t(config.gpuBatchSize)) { evaluateOrdered(batch,false); batch.clear(); }
                 }
-            if(!batch.empty()) evaluateBatch(batch,false);
+            if(!batch.empty()) evaluateOrdered(batch,false);
             if (*bestScore == previousScore) break;
           }
           if (step == searchStep) break;
@@ -1459,6 +1474,7 @@ PlacementResult placePartsBitmapOnSingleSheet(const Polygon& sheet,
     } else if (!fromPattern) {
       ++localStats.exhaustedShapeSkips;
     }
+    }
     } catch(const SearchTimeExpired&) {
       // Keep the best fully validated candidate even if refinement was stopped.
       localStats.timeLimitReached=true;
@@ -1468,6 +1484,8 @@ PlacementResult placePartsBitmapOnSingleSheet(const Polygon& sheet,
         std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - partStart).count();
 
     if (!acceptedPlacement.has_value() || acceptedMask == nullptr) {
+      if(config.bitmapBottomLeft && config.bitmapCacheRejects && !localStats.timeLimitReached)
+        failedContactVersions[searchIdentity]=placedCount;
       out.unplaced.push_back(part);
       ++unplacedCount;
       localStats.unplacedParts++;
@@ -1629,6 +1647,9 @@ PlacementResult placePartsBitmap(const std::vector<Polygon>& sheets,
   const auto start=std::chrono::steady_clock::now();
   const bool hasHoles=std::any_of(parts.begin(),parts.end(),[](const Polygon& p) { return !p.children.empty(); });
   const int trialCount=config.bitmapBottomLeft || (parts.size()<6 && !hasHoles) ? 1 : std::clamp(config.bitmapTrials,1,4);
+  if(config.bitmapRejectCacheMiB<1||config.bitmapRejectCacheMiB>4096)
+    throw std::invalid_argument("cacheMemoryMiB must be between 1 and 4096");
+  detail::RejectionCacheBudget rejectionBudget(size_t(config.bitmapRejectCacheMiB)*1024*1024);
   const int workerCount=std::min(trialCount,normalizeWorkerCount(config.threads));
   const int helpersPerTrial=std::max(1,normalizeWorkerCount(config.threads)/workerCount);
   // Keep one independently executed strategy's result and diagnostics.
@@ -1686,7 +1707,7 @@ PlacementResult placePartsBitmap(const std::vector<Polygon>& sheets,
           if (remaining.empty()) break;
           if(deadline.expired()) { trial.stats.timeLimitReached=true; break; }
           BitmapNestingStats s;
-          auto r=placePartsBitmapOnSingleSheet(sheet,remaining,cfg,parallel,gpu,deadline,useAvx2,&s,{});
+          auto r=placePartsBitmapOnSingleSheet(sheet,remaining,cfg,parallel,rejectionBudget,gpu,deadline,useAvx2,&s,{});
           trial.result.area+=r.area;
           trial.result.totalarea+=r.totalarea;
           trial.result.placements.insert(trial.result.placements.end(),r.placements.begin(),r.placements.end());
@@ -1708,6 +1729,7 @@ PlacementResult placePartsBitmap(const std::vector<Polygon>& sheets,
           t.searchWindowExpansions+=s.searchWindowExpansions;
           t.fineFallbacks+=s.fineFallbacks;
           t.exhaustedShapeSkips+=s.exhaustedShapeSkips;
+          t.failedSearchSkips+=s.failedSearchSkips;
           t.rejectedPositionSkips+=s.rejectedPositionSkips;
           t.patternPlacements+=s.patternPlacements;
           t.holePlacements+=s.holePlacements;
@@ -1734,6 +1756,7 @@ PlacementResult placePartsBitmap(const std::vector<Polygon>& sheets,
           snapshot.workersUsed=workerCount;
           snapshot.proposalWorkersPerTrial=helpersPerTrial;
           snapshot.cpuWorkersUsed=workerCount*helpersPerTrial;
+          snapshot.rejectionCachePeakBytes=rejectionBudget.peak();
           std::lock_guard lock(layoutMutex);
           onLayout(trial.result,snapshot);
         }
@@ -1782,12 +1805,14 @@ PlacementResult placePartsBitmap(const std::vector<Polygon>& sheets,
         !trials[i].stats.timeLimitReached});
   }
   winner.stats.startedTrials=startedTrials;
+  winner.stats.totalStartedTrials=startedTrials;
   winner.stats.completedTrials=completedTrials;
   winner.stats.cancelled=deadline.cancelled();
   winner.stats.timeLimitReached=completedTrials<size_t(trialCount) && deadline.timedOut();
   winner.stats.workersUsed=workerCount;
   winner.stats.proposalWorkersPerTrial=helpersPerTrial;
   winner.stats.cpuWorkersUsed=workerCount*helpersPerTrial;
+  winner.stats.rejectionCachePeakBytes=rejectionBudget.peak();
   winner.stats.simdBackend=useAvx2 ? "avx2" : "scalar";
   winner.stats.totalBitmapMs=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-start).count();
   // Only publish the selected result, on the caller thread. Worker callbacks

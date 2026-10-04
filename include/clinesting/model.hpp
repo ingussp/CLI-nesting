@@ -99,6 +99,7 @@ struct Config {
   // two additionally tries holes-first pair/row patterns, concurrently when possible.
   int bitmapTrials{2};
   bool bitmapCacheRejects{true};
+  int bitmapRejectCacheMiB{256}; // Shared by concurrent strategies; sparse pages grow on demand.
   bool bitmapPatternTrial{false}; // internal strategy selector
   bool gpuEnabled{false};
   int gpuDevice{-1}; // -1 chooses a discrete GPU when available

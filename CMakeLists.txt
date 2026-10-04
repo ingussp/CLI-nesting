@@ -69,3 +69,23 @@ if(CLINESTING_BUILD_TESTS)
   endif()
 endif()
 
+
+if(CLINESTING_BUILD_TESTS)
+  add_executable(clearance_index_tests tests/clearance_index.cpp)
+  target_include_directories(clearance_index_tests PRIVATE src)
+  target_link_libraries(clearance_index_tests PRIVATE clinesting)
+  add_test(NAME clearance_index COMMAND clearance_index_tests)
+endif()
+
+if(CLINESTING_BUILD_TESTS)
+  add_executable(validate_indexed_layout tests/validate_indexed_layout.cpp)
+  target_include_directories(validate_indexed_layout PRIVATE third_party)
+  target_link_libraries(validate_indexed_layout PRIVATE clinesting)
+endif()
+
+if(CLINESTING_BUILD_TESTS)
+  add_executable(convex_pair_cache_tests tests/convex_pair_cache.cpp)
+  target_include_directories(convex_pair_cache_tests PRIVATE src)
+  target_link_libraries(convex_pair_cache_tests PRIVATE clinesting)
+  add_test(NAME convex_pair_cache COMMAND convex_pair_cache_tests)
+endif()

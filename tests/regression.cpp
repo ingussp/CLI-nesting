@@ -5,6 +5,7 @@
 #include "clinesting/continuous_nesting.hpp"
 #include "raster_scanline.hpp"
 #include "free_rectangles.hpp"
+#include "rejection_cache.hpp"
 #include <algorithm>
 #include <atomic>
 #include <cmath>
@@ -428,9 +429,66 @@ void modeSearchAndRefinement() {
   require(!improvesLayout(layoutQuality(req.sheets,first.placement,first.bitmapStats),layoutQuality(req.sheets,timed.placement,timed.bitmapStats)),"Timed result regressed from initial contact layout");
   valid(req.sheets.front(),req.individual.placement,timed.placement,req.config);
 }
+void sparseRejectionBudgetAndFailureEpochs() {
+  detail::RejectionCacheBudget budget(1280);
+  {
+    detail::RejectedOrigins a,b;a.rows=b.rows=1000;a.rotations=b.rotations=360;
+    a.size=b.size=1000000000000ULL;a.configure(&budget);b.configure(&budget);
+    for(uint64_t i=0;i<64;++i) a.insert(i);
+    require(a.next(0)==64 && a.contains(63),"Sparse cache word traversal failed");
+    a.insert(4096);require(a.contains(4096),"Sparse page boundary lost");
+    b.insert(8192);require(!b.contains(8192),"Shared cache budget exceeded");
+    require(budget.used()==1280,"Sparse cache must charge only touched pages");
+    require(a.next(4096)==4097 && a.next(8192)==8192,"Sparse missing bit/page became a false rejection");
+  }
+  require(budget.used()==0 && budget.peak()==1280,"Cache lifetime did not return its shared budget");
+  auto cfg=settings();cfg.bitmapBottomLeft=true;cfg.spacing=cfg.sheetSpacing=cfg.holeSpacing=0;
+  auto sheet=rectangle(0,0,100,140,99);
+  std::vector<Polygon> parts{rectangle(0,0,120,2,1),rectangle(0,0,120,2,2),
+      rectangle(0,0,24,10,3),rectangle(0,0,120,2,4),rectangle(0,0,120,2,5)};
+  BitmapNestingStats stats;const auto cached=placePartsBitmap({sheet},parts,cfg,&stats);
+  require(stats.failedSearchSkips==2,"Failed contact searches must be invalidated after a placement");
+  cfg.bitmapCacheRejects=false;sameLayout(cached,placePartsBitmap({sheet},parts,cfg));
+  cfg.bitmapCacheRejects=true;parts.resize(2);parts[1].allowedAngles={90};
+  const auto rotated=placePartsBitmap({sheet},parts,cfg,&stats);
+  require(rotated.unplaced.size()==1 && stats.failedSearchSkips==0,"Failed search cache mixed rotation policies");
+  valid(sheet,parts,rotated,cfg);
+}
+void gpuOrderedBatchParity() {
+  std::vector<GpuDeviceInfo> devices;try {devices=listGpuDevices();}catch(...) {return;}
+  if(devices.empty()) return;
+  auto cfg=settings();cfg.bitmapBottomLeft=true;cfg.threads=4;cfg.spacing=2.5;
+  auto sheet=rectangle(0,0,160,180,99);
+  Polygon shape;shape.points={{0,0},{30,0},{30,4},{8,4},{8,25},{0,25}};
+  defaultAllowedAngles(shape,36);
+  std::vector<Polygon> parts;for(int i=0;i<16;++i) {auto p=shape;p.id=i+1;parts.push_back(p);}
+  const auto cpu=placePartsBitmap({sheet},parts,cfg);
+  cfg.gpuEnabled=true;cfg.gpuDevice=0;cfg.gpuFallbackToCpu=false;
+  BitmapNestingStats small,large;cfg.gpuBatchSize=256;
+  const auto a=placePartsBitmap({sheet},parts,cfg,&small);
+  cfg.gpuBatchSize=65536;const auto b=placePartsBitmap({sheet},parts,cfg,&large);
+  sameLayout(cpu,a);sameLayout(a,b);valid(sheet,parts,b,cfg);
+  require(large.gpuBatches>0 && large.gpuBatches<small.gpuBatches,"GPU batches must honor the requested size");
+}
+void timedSeedLeavesPortfolioBudget() {
+  auto req=parseNestingJson(R"({"config":{"mode":"timed","timeLimitSeconds":1.5,"continuousRoundSeconds":0.3,"threads":2,"cacheMemoryMiB":1,"gpu":false},"sheets":[{"width":2000,"height":2800}],"parts":[{"points":[[0,0],[30,0],[30,4],[8,4],[8,25],[0,25]],"quantity":1000,"rotations":360}]})");
+  const auto result=runTimedNesting(req,[]{return false;});
+  if(result.bitmapStats.searchIterations<=1||result.bitmapStats.totalStartedTrials<3)
+    std::cerr<<"Timed test iterations="<<result.bitmapStats.searchIterations<<" strategies="<<result.bitmapStats.totalStartedTrials<<" elapsed="<<result.timings.totalMs<<'\n';
+  require(result.bitmapStats.searchIterations>1 && result.bitmapStats.totalStartedTrials>=3,
+          "A slow seed must leave time for portfolio strategies");
+  require(result.bitmapStats.rejectionCachePeakBytes<=1024*1024,"Concurrent strategies exceeded the shared rejection budget");
+  valid(req.sheets.front(),req.individual.placement,result.placement,req.config);
+  for(const auto value:{0,4097}) {
+    bool rejected=false;
+    try {parseNestingJson("{\"config\":{\"cacheMemoryMiB\":"+std::to_string(value)+"},\"sheets\":[{\"width\":10,\"height\":10}],\"parts\":[{\"points\":[[0,0],[1,0],[0,1]]}]}");}
+    catch(const std::invalid_argument&) {rejected=true;}
+    require(rejected,"Invalid cache memory budget was accepted");
+  }
+}
 int main() {
   try {
-    stockObstaclesInBottomLeftSearch();fractionalHoleAndSheetMargins();modeSearchAndRefinement();bottomLeftSearch();scanlines();freeRectangleProof();mixedPanelsAndMultipleSheets();duplicateContours();holesFirst();rotatedAndMultipleHoles();concavePocket();rowsAndGpuPolicy();interrupted();mixedOneAngleWorkers();repeatedInsertsAfterHoleFills();singletonWindowExpansion();timedAlternatives();gpuFailurePolicy();gpuFastPathsWhenAvailable();
+    timedSeedLeavesPortfolioBudget();sparseRejectionBudgetAndFailureEpochs();gpuOrderedBatchParity();stockObstaclesInBottomLeftSearch();fractionalHoleAndSheetMargins();modeSearchAndRefinement();bottomLeftSearch();scanlines();freeRectangleProof();mixedPanelsAndMultipleSheets();duplicateContours();holesFirst();rotatedAndMultipleHoles();concavePocket();rowsAndGpuPolicy();interrupted();mixedOneAngleWorkers();repeatedInsertsAfterHoleFills();singletonWindowExpansion();timedAlternatives();gpuFailurePolicy();gpuFastPathsWhenAvailable();
     std::cout<<"All nesting regression checks passed\n";return 0;
   } catch(const std::exception& e) {std::cerr<<e.what()<<"\n";return 1;}
 }
