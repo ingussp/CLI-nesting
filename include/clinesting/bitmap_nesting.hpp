@@ -56,6 +56,9 @@ struct BitmapNestingStats {
   size_t searchWindowExpansions{0};
   size_t fineFallbacks{0};
   size_t exhaustedShapeSkips{0};
+  size_t failedSearchSkips{0};
+  size_t rejectionCachePeakBytes{0};
+  size_t totalStartedTrials{0};
   size_t rejectedPositionSkips{0};
   size_t patternPlacements{0};
   size_t holePlacements{0};

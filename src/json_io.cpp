@@ -180,6 +180,7 @@ void configure(const Json& j,Config& c) {
     } else if(k=="bitmapSearchStepPx" || k=="step") c.bitmapSearchStepPx=integer(v,k,1,100000);
     else if(k=="curveTolerance") { c.curveTolerance=number(v,k); if(c.curveTolerance<0) throw std::invalid_argument(k+" must be nonnegative"); }
     else if(k=="cacheRejects") { if(!v.is_boolean()) throw std::invalid_argument(k+" must be boolean"); c.bitmapCacheRejects=v.get<bool>(); }
+    else if(k=="cacheMemoryMiB") c.bitmapRejectCacheMiB=integer(v,k,1,4096);
     else if(k=="spacing" || k=="partToSheet" || k=="partToHole") {
       const double gap=number(v,k);
       if(gap<0) throw std::invalid_argument(k+" must be nonnegative");
@@ -321,7 +322,7 @@ void writeNestingJson(const std::filesystem::path& path,const BackgroundRequest&
     {"proposalWorkersPerTrial",run.bitmapStats.proposalWorkersPerTrial},
     {"cpuWorkersUsed",run.bitmapStats.cpuWorkersUsed},{"candidateWorkersUsed",run.bitmapStats.candidateWorkersUsed},
     {"patternPlacements",run.bitmapStats.patternPlacements},{"rejectedPositionSkips",run.bitmapStats.rejectedPositionSkips},
-    {"holePlacements",run.bitmapStats.holePlacements},
+    {"holePlacements",run.bitmapStats.holePlacements},{"failedSearchSkips",run.bitmapStats.failedSearchSkips},
     {"sheets",Json::array()},{"unplaced",Json::array()}};
   out["bitmapSearch"]=input.config.mode==SearchMode::First ? "bottom-left" : "portfolio";
   out["vectorRefinement"]={{"moves",run.bitmapStats.vectorMoves},{"checks",run.bitmapStats.vectorChecks},{"milliseconds",run.bitmapStats.vectorRefinementMs},{"toleranceMm",0.001},{"completed",run.bitmapStats.vectorRefinementCompleted}};
@@ -345,6 +346,8 @@ void writeNestingJson(const std::filesystem::path& path,const BackgroundRequest&
   out["occupiedBoundsArea"]=run.bitmapStats.occupiedBoundsArea;
   out["compactWasteArea"]=std::max(0.0,run.bitmapStats.occupiedBoundsArea-r.area);
   out["startedTrials"]=run.bitmapStats.startedTrials;
+  out["totalStartedTrials"]=run.bitmapStats.totalStartedTrials;
+  out["rejectionCache"]={{"budgetMiB",input.config.bitmapRejectCacheMiB},{"peakAccountedBytes",run.bitmapStats.rejectionCachePeakBytes}};
   out["gpu"]={{"requested",input.config.gpuEnabled},{"backend","opencl"},
     {"used",run.bitmapStats.gpuBatches>0},{"device",run.bitmapStats.gpuDevice},
     {"candidates",run.bitmapStats.gpuCandidates},{"batches",run.bitmapStats.gpuBatches},

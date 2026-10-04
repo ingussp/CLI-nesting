@@ -53,7 +53,14 @@ static OrchestratorRunStats optimize(BackgroundRequest request,const std::functi
   OrchestratorRunStats best;
   best.placement.unplaced=request.individual.placement;
   best.bitmapStats.unplacedParts=request.individual.placement.size();
-  size_t gpuBatches=0,gpuCandidates=0;
+  size_t gpuBatches=0,gpuCandidates=0,totalStartedTrials=0,cachePeak=0;
+  size_t cpuWorkers=0,candidateWorkers=0;
+  auto recordWorkers=[&](const BitmapNestingStats& stats) {
+    totalStartedTrials+=stats.totalStartedTrials;
+    cachePeak=std::max(cachePeak,stats.rejectionCachePeakBytes);
+    cpuWorkers=std::max(cpuWorkers,stats.cpuWorkersUsed);
+    candidateWorkers=std::max(candidateWorkers,stats.candidateWorkersUsed);
+  };
   std::string gpuDevice,gpuFallback;
   auto consider=[&](const PlacementResult& placement,const BitmapNestingStats& stats) {
     const auto quality=layoutQuality(request.sheets,placement,stats);
@@ -81,15 +88,16 @@ static OrchestratorRunStats optimize(BackgroundRequest request,const std::functi
     void onResult(const PlacementResult&) override {}
   } sink;
   BackgroundOrchestrator orchestrator;
-  // Establish the same refined baseline as first mode before spending the
-  // remaining budget on competing orders and strategies. GPU setup is included
-  // in the overall deadline, not an artificially short restart deadline.
+  // Seed a fast layout, reserving most of a timed job for competing strategies.
+  // Short budgets still use the same global cancellation hook for GPU setup.
   if(!stop() && !expired()) {
     auto seed=request;
     seed.config.mode=SearchMode::First;
     seed.config.bitmapTrials=1;
-    seed.config.timeLimitSeconds=timed ? std::max(0.000001,std::chrono::duration<double>(end-std::chrono::steady_clock::now()).count()) : request.config.continuousRoundSeconds;
+    seed.config.timeLimitSeconds=timed ? std::max(0.000001,std::min({budget*0.2,
+        request.config.continuousRoundSeconds,std::chrono::duration<double>(end-std::chrono::steady_clock::now()).count()})) : request.config.continuousRoundSeconds;
     const auto initial=orchestrator.runWithStats(seed,sink,consider);
+    recordWorkers(initial.bitmapStats);
     gpuBatches+=initial.bitmapStats.gpuBatches;
     gpuCandidates+=initial.bitmapStats.gpuCandidates;
     gpuDevice=initial.bitmapStats.gpuDevice;
@@ -98,10 +106,11 @@ static OrchestratorRunStats optimize(BackgroundRequest request,const std::functi
     request.config.searchIteration=1;
   }
   while(!stop() && !expired()) {
-    request.config.timeLimitSeconds=timed ? std::min(std::min(1.0,request.config.continuousRoundSeconds),
-        std::chrono::duration<double>(end-std::chrono::steady_clock::now()).count()) : std::min(1.0,request.config.continuousRoundSeconds);
+    request.config.timeLimitSeconds=timed ? std::min(request.config.continuousRoundSeconds,
+        std::chrono::duration<double>(end-std::chrono::steady_clock::now()).count()) : request.config.continuousRoundSeconds;
     if(request.config.timeLimitSeconds<=0) break;
     const auto result=orchestrator.runWithStats(request,sink,consider);
+    recordWorkers(result.bitmapStats);
     gpuBatches+=result.bitmapStats.gpuBatches;
     gpuCandidates+=result.bitmapStats.gpuCandidates;
     if(!result.bitmapStats.gpuDevice.empty()) gpuDevice=result.bitmapStats.gpuDevice;
@@ -111,6 +120,10 @@ static OrchestratorRunStats optimize(BackgroundRequest request,const std::functi
     ++request.config.searchIteration;
   }
   best.bitmapStats.searchIterations=request.config.searchIteration;
+  best.bitmapStats.totalStartedTrials=totalStartedTrials;
+  best.bitmapStats.rejectionCachePeakBytes=cachePeak;
+  best.bitmapStats.cpuWorkersUsed=cpuWorkers;
+  best.bitmapStats.candidateWorkersUsed=candidateWorkers;
   best.bitmapStats.cancelled=stop();
   best.bitmapStats.gpuBatches=gpuBatches;
   best.bitmapStats.gpuCandidates=gpuCandidates;
