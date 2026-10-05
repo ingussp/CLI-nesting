@@ -364,6 +364,21 @@ void mixedPanelsAndMultipleSheets() {
   require(stats.gpuBatches>0 && stats.gpuFallbackReason.empty(),"Multi-sheet GPU job did not use the GPU");
   sameLayout(cpu,gpu);
 }
+void restartAnchorAngles() {
+  auto cfg=settings();cfg.mode=SearchMode::Continuous;cfg.bitmapPatternTrial=false;
+  auto sheet=rectangle(0,0,150,100,99);
+  std::vector<Polygon> parts;
+  for(int i=1;i<=5;++i) {auto p=rectangle(0,0,20,8,i);p.allowedAngles={0,45,90,135};parts.push_back(p);}
+  for(int iteration:{1,2}) {
+    cfg.searchIteration=iteration;
+    const auto serial=placePartsBitmap({sheet},parts,cfg);
+    require(serial.unplaced.empty(),"Anchor exploration lost an otherwise feasible copy");
+    require(serial.placements.front().sheetplacements.front().rotation==iteration*45,
+            "Identical-part restarts must explore the next permitted anchor angle");
+    valid(sheet,parts,serial,cfg);
+    cfg.threads=12;sameLayout(serial,placePartsBitmap({sheet},parts,cfg));cfg.threads=1;
+  }
+}
 void bottomLeftSearch() {
   auto cfg=settings();cfg.bitmapBottomLeft=true;cfg.spacing=6.5;cfg.holeSpacing=6.5;cfg.sheetSpacing=0;cfg.threads=1;
   auto sheet=rectangle(0,0,100,80,99);
@@ -488,7 +503,7 @@ void timedSeedLeavesPortfolioBudget() {
 }
 int main() {
   try {
-    timedSeedLeavesPortfolioBudget();sparseRejectionBudgetAndFailureEpochs();gpuOrderedBatchParity();stockObstaclesInBottomLeftSearch();fractionalHoleAndSheetMargins();modeSearchAndRefinement();bottomLeftSearch();scanlines();freeRectangleProof();mixedPanelsAndMultipleSheets();duplicateContours();holesFirst();rotatedAndMultipleHoles();concavePocket();rowsAndGpuPolicy();interrupted();mixedOneAngleWorkers();repeatedInsertsAfterHoleFills();singletonWindowExpansion();timedAlternatives();gpuFailurePolicy();gpuFastPathsWhenAvailable();
+    restartAnchorAngles();timedSeedLeavesPortfolioBudget();sparseRejectionBudgetAndFailureEpochs();gpuOrderedBatchParity();stockObstaclesInBottomLeftSearch();fractionalHoleAndSheetMargins();modeSearchAndRefinement();bottomLeftSearch();scanlines();freeRectangleProof();mixedPanelsAndMultipleSheets();duplicateContours();holesFirst();rotatedAndMultipleHoles();concavePocket();rowsAndGpuPolicy();interrupted();mixedOneAngleWorkers();repeatedInsertsAfterHoleFills();singletonWindowExpansion();timedAlternatives();gpuFailurePolicy();gpuFastPathsWhenAvailable();
     std::cout<<"All nesting regression checks passed\n";return 0;
   } catch(const std::exception& e) {std::cerr<<e.what()<<"\n";return 1;}
 }

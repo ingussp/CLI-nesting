@@ -325,6 +325,7 @@ void writeNestingJson(const std::filesystem::path& path,const BackgroundRequest&
     {"holePlacements",run.bitmapStats.holePlacements},{"failedSearchSkips",run.bitmapStats.failedSearchSkips},
     {"sheets",Json::array()},{"unplaced",Json::array()}};
   out["bitmapSearch"]=input.config.mode==SearchMode::First ? "bottom-left" : "portfolio";
+  out["sheetRefill"]={{"placements",run.bitmapStats.refillPlacements},{"passes",run.bitmapStats.refillPasses}};
   out["vectorRefinement"]={{"moves",run.bitmapStats.vectorMoves},{"checks",run.bitmapStats.vectorChecks},{"milliseconds",run.bitmapStats.vectorRefinementMs},{"toleranceMm",0.001},{"completed",run.bitmapStats.vectorRefinementCompleted}};
   out["searchIterations"]=run.bitmapStats.searchIterations;
   out["selectedTrial"]=run.bitmapStats.selectedTrial;

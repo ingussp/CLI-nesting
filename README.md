@@ -260,24 +260,24 @@ memory.
 | 3 | `large_first` | Sorts remaining parts by material area descending and places the largest first. |
 | 4 | `small_first` | Sorts remaining parts by material area ascending and places the smallest first. |
 
-The winner is chosen by, in order: fewest unplaced copies, then fewest accepted
-placements, then the smallest occupied bounding rectangle. The chosen index is
+The winner is chosen by, in order: fewest unplaced copies, then least used-sheet
+waste, then the smallest occupied bounding rectangle. The chosen index is
 reported as `selectedTrial`, and each strategy's count, duration, completion and
 phase timings appear in `strategyResults`.
 
 `trials` takes effect only in `mode: "timed"` and `mode: "continuous"`.
-Mode `first` runs the single `first_fast` strategy described below and ignores `trials`.
+Mode `first` runs the single `first_bottom_left` strategy described below and ignores `trials`.
 Jobs with fewer than six part copies and no part holes also use one strategy.
 Small jobs containing part holes retain the requested alternatives: even one
 frame and one insert can depend on placing the frame first.
 
 ### First layout
 
-Mode first runs one `first_fast` strategy across available sheets and exports
-its result without optimization restarts. It orders parts by largest hole area,
-then material area, so cavity-bearing parts are available before small inserts.
-It tries permitted orientations inside already placed holes first. Repeated
-parts then use clearance-aware row/pair patterns; compact search is the fallback.
+Mode first runs one `first_bottom_left` strategy across available sheets and
+exports its result without optimization restarts. It orders parts by material
+area, largest first, and tries permitted orientations inside existing holes and
+at contact positions. Free rectangle corners propose additional gap placements.
+Each sheet is compacted and refilled before opening the next sheet.
 
 Hole bounds propose positions but never authorize a placement: the whole outline
 must fit the actual hole, and normal stock, collision and clearance checks still
@@ -412,7 +412,8 @@ CAD exchange file, not JSON with a changed extension.
 | `trials`, `startedTrials`, `selectedTrial` | Strategy counts and winner diagnostics |
 | `workersUsed`, `proposalWorkersPerTrial` | Strategy worker count and CPU slots per strategy (including its caller) |
 | `cpuWorkersUsed` | Total CPU pool size across strategy workers and helpers; does not exceed `threads` |
-| `candidateWorkersUsed` | Largest number of CPU slots doing exact geometry checks in one batch of the selected strategy |
+| `candidateWorkersUsed` | Largest number of CPU slots checking bitmap or exact geometry candidates in one batch of the selected strategy |
+| `sheetRefill` | Additional placements and successful refill passes after per-sheet vector compaction |
 | `patternPlacements`, `holePlacements`, `rejectedPositionSkips` | Pattern placements, copies inserted in part holes, and failed-position cache diagnostics |
 | `strategyResults` | Per-strategy counts, duration, completion and phase timings |
 | `gpu.requested`, `used`, `device`, `backend` | Request, actual kernel use, device and OpenCL backend |
@@ -500,20 +501,21 @@ hardware checks print a skip reason; GPU failure-policy tests still run.
 ### Search modes and subpixel clearance
 
 `mode: "first"` automatically builds one large-first, bottom-left bitmap layout.
-It tries contact positions and existing hole pockets without NFP contact proposals,
-pair patterns or exhaustive grid fallback. No additional bitmapSearch input option
-is needed. This fast heuristic can miss feasible pockets or use additional sheets.
+Its initial pass tries contact positions, free rectangle corners and existing
+hole pockets. A per-sheet refill pass additionally uses a coarse grid and local
+refinement, without exhaustive fine-grid fallback. No additional bitmapSearch
+input option is needed. This heuristic can still miss feasible pockets.
 
 `mode: "timed"` first retains the same fast layout, then compares different part
 orders, permitted orientations and contact/compact strategies until the shared
 time limit. `continuous` keeps searching until cancellation. Search rounds after
-the initial layout are capped at one second to allow multiple restarts. Ranking
+the initial layout use `continuousRoundSeconds` as their budget. Ranking
 prioritizes fewer unplaced parts, then less used-sheet waste, then compactness.
 Only improvements replace the incumbent. A finite time budget does not enumerate
 all permutations or prove an optimum. `searchIterations` reports attempted
 iterations including the initial seed in timed/continuous mode.
 
-After each strategy finishes placing parts, bounded vector refinement moves
+After placing parts on each sheet, bounded vector refinement moves
 parts down/left using continuous coordinates and exact polygon clearance checks.
 It keeps original geometry and rotations, checks sheet margins, stock cutouts,
 part outlines and holes, and never reuses stale bitmap occupancy after moving.
@@ -528,4 +530,35 @@ Time limits and cancellation also apply during refinement. An interrupted result
 retains only already validated moves. Result JSON reports `vectorRefinement`
 (checks, moves, elapsed milliseconds, tolerance and completion) and `bitmapSearch`
 (`bottom-left` for first; `portfolio` for timed/continuous). Refinement keeps the
-placed count and sheets unchanged; it does not reinsert currently unplaced parts.
+original geometry and permitted orientations. The engine then rebuilds occupancy
+on the sheet grid, discards stale rejection caches, and tries the remaining copies
+on that sheet again. Successful refill/compaction passes repeat until no copy is
+added or cancellation/deadline ends the search. `sheetRefill` reports added copies
+and successful passes. Only then does the strategy open the next sheet.
+
+Repeated-part NFP and pair-pattern proposals include the configured part spacing;
+raw touching-contour vertices are insufficient when that spacing is positive.
+Exact geometry remains authoritative. Timed/continuous restarts cycle through
+permitted anchor orientations as well as perturbing the part order. With
+`rotations: 360`, the permitted orientations are one degree apart; this does not
+enumerate every combination of angles, orders and positions recursively.
+
+CPU candidate batches can include multiple rotations while pinning their masks
+within the lazy raster cache budget. `threads: 12` supplies at most 12 execution
+slots, not a guarantee of constant 12-core utilization: placement commits, ranking
+and vector compaction still contain serial work.
+
+`quality_examples` uses `tests/fixtures/{zvaigzne,plaukts,aplis}.json`, checks the
+regressed upper strip and panel channels, and compares deterministic results at
+1 and 12 threads. The ring fixture is discretized from `aplisArCaurumu.FCStd`
+(outer radius 44 mm, inner radius 31 mm, 0.05 mm contour tolerance) with eight
+15 x 15 mm inserts. Output is checked by `validate_indexed_layout` using the
+exhaustive polygon predicates. Run all checks after configuring tests:
+
+```text
+cmake --preset windows-release -DCLINESTING_BUILD_TESTS=ON
+cmake --build --preset windows-release --parallel
+ctest --test-dir build-release -C Release --output-on-failure
+```
+
+Python 3.8 or newer is needed for the protocol and quality-example tests.
