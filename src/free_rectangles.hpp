@@ -10,6 +10,7 @@ struct PixelRect { int x{},y{},width{},height{}; };
 class FreeRectangles {
  public:
   FreeRectangles(int width,int height):free_{{0,0,width,height}} {}
+  const std::vector<PixelRect>& regions() const { return free_; }
   bool fits(int width,int height) const {
     if(!enabled_ || width<=0 || height<=0) return true;
     return std::any_of(free_.begin(),free_.end(),[&](const auto& r) {

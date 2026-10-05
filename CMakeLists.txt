@@ -81,6 +81,11 @@ if(CLINESTING_BUILD_TESTS)
   add_executable(validate_indexed_layout tests/validate_indexed_layout.cpp)
   target_include_directories(validate_indexed_layout PRIVATE third_party)
   target_link_libraries(validate_indexed_layout PRIVATE clinesting)
+  if(Python3_Interpreter_FOUND)
+    add_test(NAME quality_examples
+      COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/quality_examples.py
+              --exe $<TARGET_FILE:clinesting_cli> --validator $<TARGET_FILE:validate_indexed_layout>)
+  endif()
 endif()
 
 if(CLINESTING_BUILD_TESTS)
