@@ -47,6 +47,10 @@ class GpuBitmap {
   void toggleMask(uint32_t rotation,int32_t x,int32_t y);
   // Upload packed rotation masks and their dimensions.
   void setMasks(std::span<const GpuMaskInfo> masks, std::span<const uint64_t> words);
+  // Reserve packed masks without constructing all pixels on the CPU first.
+  // Every range must be uploaded before filtering or occupancy updates use it.
+  void allocateMasks(std::span<const GpuMaskInfo> masks, size_t wordCount);
+  void uploadMaskRange(uint32_t firstMask, uint32_t count, std::span<const uint64_t> words);
   // Flags preserve input order, including invalid origins. A 1 means raster
   // feasible; callers must still perform exact geometry validation.
   std::vector<uint8_t> filter(std::span<const GpuCandidate> candidates);

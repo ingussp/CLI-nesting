@@ -11,6 +11,7 @@ class RecursiveGpuBroker {
   std::condition_variable ready_;
   uint64_t next_{0},serving_{0};
   bool atlasReady_{false};
+  std::unordered_set<uint32_t> readyPolicies_;
   size_t sheet_{SIZE_MAX};
   struct Lease {
     RecursiveGpuBroker& broker;
@@ -27,6 +28,11 @@ class RecursiveGpuBroker {
     Lease turn(*this);
     if(atlasReady_) return;
     loader(device_);atlasReady_=true;
+  }
+  template<class Loader> void preparePolicy(uint32_t first,Loader&& loader) {
+    Lease turn(*this);
+    if(readyPolicies_.contains(first)) return;
+    loader(device_);readyPolicies_.insert(first);
   }
   std::vector<uint8_t> filter(size_t owner,size_t sheet,const BitmapGrid& material,
       const BitmapGrid& occupied,std::vector<RecursiveGpuUpdate>& updates,uint64_t first,
@@ -171,15 +177,16 @@ PlacementResult recursiveBitmapSearch(const std::vector<Polygon>& sheets,
     }
     if(gpu && !masks.empty()) try {
       gpu->prepare([&](GpuBitmap& device) {
-        std::vector<GpuMaskInfo> atlas;std::vector<uint64_t> words;
+        std::vector<GpuMaskInfo> atlas;size_t words=0;
         for(const auto& item:masks) {
-          deadline.check();pixels.ensure(*item);const auto& m=*item;
-          if(words.size()+m.bits.size()>64ULL*1024*1024)
+          deadline.check();const auto& m=*item;
+          const size_t size=m.wordsPerRow*size_t(m.heightPx);
+          if(words+size>64ULL*1024*1024)
             throw std::runtime_error("Recursive rotation atlas exceeds 512 MiB");
-          atlas.push_back({uint32_t(m.widthPx),uint32_t(m.heightPx),uint32_t(m.wordsPerRow),uint32_t(words.size())});
-          words.insert(words.end(),m.bits.begin(),m.bits.end());
+          atlas.push_back({uint32_t(m.widthPx),uint32_t(m.heightPx),uint32_t(m.wordsPerRow),uint32_t(words)});
+          words+=size;
         }
-        device.setMasks(atlas,words);
+        device.allocateMasks(atlas,words);
       });
     } catch(const std::exception& e) {gpuFailure(e);}
     counts.cachedMaskCount=masks.size();
@@ -270,6 +277,21 @@ PlacementResult recursiveBitmapSearch(const std::vector<Polygon>& sheets,
         const uint32_t batch=uint32_t(std::min<uint64_t>(limit,total-frame.next));
         frame.batchSize=std::min<uint32_t>(config.gpuBatchSize,limit*2);
         if(gpu) try {
+          // Upload only the policy reached by this branch. Other parts' pixels
+          // remain unbuilt, and both CPU workers reuse each uploaded range.
+          const auto fullPolicy=policies[depth];
+          gpu->preparePolicy(fullPolicy.first,[&](GpuBitmap& device) {
+            std::vector<uint64_t> words;
+            size_t size=0;
+            for(size_t i=fullPolicy.first;i<size_t(fullPolicy.first)+fullPolicy.count;++i)
+              size+=masks[i]->wordsPerRow*size_t(masks[i]->heightPx);
+            words.reserve(size);
+            for(size_t i=fullPolicy.first;i<size_t(fullPolicy.first)+fullPolicy.count;++i) {
+              deadline.check();pixels.ensure(*masks[i]);
+              words.insert(words.end(),masks[i]->bits.begin(),masks[i]->bits.end());
+            }
+            device.uploadMaskRange(fullPolicy.first,fullPolicy.count,words);
+          });
           frame.flags=gpu->filter(worker,frame.sheet,stock.material,stock.occupied,gpuUpdates,
               frame.next,batch,rows,step,policy.first,policy.count,edge,gpuTiming);
           ++counts.gpuBatches;counts.gpuCandidates+=batch;

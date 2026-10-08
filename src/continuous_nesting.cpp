@@ -120,6 +120,12 @@ static OrchestratorRunStats optimize(BackgroundRequest request,const std::functi
     auto seed=request;
     seed.config.mode=SearchMode::First;
     seed.config.bitmapTrials=1;
+    // Dense continuous jobs need a quick incumbent before the full-angle workers
+    // start. Restrict only this seed copy; recursion retains every input angle.
+    if(recursive) for(auto& part:seed.individual.placement) if(part.allowedAngles.size()>360) {
+      const auto allowed=std::move(part.allowedAngles);part.allowedAngles.clear();
+      for(size_t i=0;i<360;++i) part.allowedAngles.push_back(allowed[i*allowed.size()/360]);
+    }
     seed.config.timeLimitSeconds=timed ? std::max(0.000001,std::min({budget*0.2,
         request.config.continuousRoundSeconds,std::chrono::duration<double>(end-std::chrono::steady_clock::now()).count()})) : request.config.continuousRoundSeconds;
     const auto initial=orchestrator.runWithStats(seed,sink,consider);

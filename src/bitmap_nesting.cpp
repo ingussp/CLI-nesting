@@ -428,7 +428,12 @@ void rowsOrScalar(uint64_t* occ, const uint64_t* mask, size_t words) {
 RasterMask rasterizePartMask(const Polygon& part, double rotationDeg, double resolutionMm, double tolerance) {
   RasterMask mask;
   mask.rotationDeg = rotationDeg;
-  mask.rotatedPart = rotatePolygon(part, rotationDeg);
+  // Copy geometry only: duplicating the complete angle policy for every mask
+  // makes R rotations consume O(R squared) memory. Output metadata stays on the
+  // original part and must not be copied hundreds of thousands of times here.
+  Polygon geometry;
+  geometry.points=part.points;geometry.children=part.children;geometry.geometryKey=part.geometryKey;
+  mask.rotatedPart = rotatePolygon(geometry, rotationDeg);
   mask.rotatedPart.rotation = rotationDeg;
   mask.rotatedPart.id = part.id;
   mask.rotatedPart.source = part.source;

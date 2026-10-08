@@ -177,6 +177,7 @@ struct GpuBitmap::Impl {
   cl_program program{};
   cl_kernel kernel{},toggleKernel{};
   std::vector<GpuMaskInfo> maskInfo;
+  std::vector<uint8_t> maskReady;
   cl_mem material{},occupancy{},masks{},bits{},candidates{},output{};
   size_t capacity=0, sheetBytes=0;
   bool occupancyReady=false;
@@ -308,18 +309,43 @@ bool GpuBitmap::selectOccupancySlot(uint64_t slot) {
   if(!p.occupancy) p.replace(p.occupancy,p.sheetBytes,CL_MEM_READ_WRITE);
   return ready;
 }
-// Upload packed rotation masks and their dimensions.
-void GpuBitmap::setMasks(std::span<const GpuMaskInfo> masks,std::span<const uint64_t> words) {
-  if(masks.empty() || masks.size()>UINT32_MAX || words.size()>UINT32_MAX) throw std::invalid_argument("Invalid GPU masks");
+// Allocate the atlas separately from per-policy pixel uploads.
+void GpuBitmap::allocateMasks(std::span<const GpuMaskInfo> masks,size_t wordCount) {
+  if(masks.empty() || masks.size()>UINT32_MAX || !wordCount || wordCount>UINT32_MAX)
+    throw std::invalid_argument("Invalid GPU masks");
   for(const auto& m:masks) if(!m.width || !m.height || m.wordsPerRow!=(uint64_t(m.width)+63)/64 ||
-      uint64_t(m.offset)+uint64_t(m.height)*m.wordsPerRow>words.size()) throw std::invalid_argument("Invalid GPU mask bounds");
+      uint64_t(m.offset)+uint64_t(m.height)*m.wordsPerRow>wordCount) throw std::invalid_argument("Invalid GPU mask bounds");
   impl_->replace(impl_->masks,masks.size_bytes(),CL_MEM_READ_ONLY,masks.data());
-  impl_->replace(impl_->bits,words.size_bytes(),CL_MEM_READ_ONLY,words.data());
+  impl_->replace(impl_->bits,wordCount*sizeof(uint64_t),CL_MEM_READ_ONLY);
   impl_->rotations=cl_uint(masks.size());
   impl_->maskInfo.assign(masks.begin(),masks.end());
+  impl_->maskReady.assign(masks.size(),0);
+}
+void GpuBitmap::uploadMaskRange(uint32_t first,uint32_t count,std::span<const uint64_t> words) {
+  const auto& info=impl_->maskInfo;
+  if(!count || first>=info.size() || count>info.size()-first) throw std::invalid_argument("Invalid GPU upload range");
+  const size_t offset=info[first].offset;
+  size_t end=offset;
+  for(size_t i=first;i<size_t(first)+count;++i) {
+    if(info[i].offset!=end) throw std::invalid_argument("GPU upload masks must be contiguous");
+    end+=size_t(info[i].height)*info[i].wordsPerRow;
+  }
+  if(words.size()!=end-offset) throw std::invalid_argument("Invalid GPU upload size");
+  check(impl_->api.clEnqueueWriteBuffer(impl_->queue,impl_->bits,CL_TRUE,offset*sizeof(uint64_t),
+      words.size_bytes(),words.data(),0,nullptr,nullptr),"upload mask range");
+  std::fill(impl_->maskReady.begin()+first,impl_->maskReady.begin()+first+count,1);
+}
+// Existing callers upload the complete atlas in one operation.
+void GpuBitmap::setMasks(std::span<const GpuMaskInfo> masks,std::span<const uint64_t> words) {
+  allocateMasks(masks,words.size());
+  check(impl_->api.clEnqueueWriteBuffer(impl_->queue,impl_->bits,CL_TRUE,0,words.size_bytes(),
+      words.data(),0,nullptr,nullptr),"upload masks");
+  std::fill(impl_->maskReady.begin(),impl_->maskReady.end(),1);
 }
 // Evaluate a batch of explicit candidate placements on the GPU.
 std::vector<uint8_t> GpuBitmap::filter(std::span<const GpuCandidate> candidates) {
+  for(const auto& c:candidates) if(c.rotation<impl_->maskReady.size() && !impl_->maskReady[c.rotation])
+    throw std::invalid_argument("GPU mask pixels are not uploaded");
   if(candidates.size()>262144) throw std::invalid_argument("GPU batch is too large");
   return impl_->run(uint32_t(candidates.size()),0,0,1,1,impl_->width,impl_->height,candidates);
 }
@@ -327,6 +353,8 @@ std::vector<uint8_t> GpuBitmap::filter(std::span<const GpuCandidate> candidates)
 std::vector<uint8_t> GpuBitmap::filterGrid(uint64_t first,uint32_t count,uint32_t rows,uint32_t step,uint32_t ww,uint32_t wh,uint32_t firstMask,uint32_t maskCount,uint32_t originX,uint32_t originY) {
   if(!maskCount) maskCount=impl_->rotations;
   if(firstMask>impl_->rotations || maskCount>impl_->rotations-firstMask) throw std::invalid_argument("Invalid GPU mask range");
+  if(std::find(impl_->maskReady.begin()+firstMask,impl_->maskReady.begin()+firstMask+maskCount,uint8_t(0))!=impl_->maskReady.begin()+firstMask+maskCount)
+    throw std::invalid_argument("GPU mask pixels are not uploaded");
   if(!rows || !step || !impl_->rotations || uint64_t(rows)*step>uint64_t(INT32_MAX) ||
       first>UINT64_MAX-count || (first+count)/maskCount/rows>uint64_t(INT32_MAX)/step)
     throw std::invalid_argument("Invalid GPU grid range");
@@ -340,7 +368,7 @@ std::vector<uint8_t> GpuBitmap::filterGrid(uint64_t first,uint32_t count,uint32_
 namespace clinesting {
 void GpuBitmap::toggleMask(uint32_t rotation,int32_t x,int32_t y) {
   auto& p=*impl_;
-  if(!p.occupancyReady || rotation>=p.maskInfo.size() || x<0 || y<0)
+  if(!p.occupancyReady || rotation>=p.maskInfo.size() || !p.maskReady[rotation] || x<0 || y<0)
     throw std::invalid_argument("Invalid GPU occupancy update");
   const auto& mask=p.maskInfo[rotation];
   if(uint64_t(x)+mask.width>p.width || uint64_t(y)+mask.height>p.height)

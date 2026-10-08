@@ -668,6 +668,43 @@ void concavePocketAngleCoverage() {
     require(!hasMaterialOutsideSheet(placed,rectangle(10,12.5,9,1),cfg),"Rotated donor missed the thin pocket");
   }
 }
+void continuousDenseAnglesRetained() {
+  auto cfg=settings();cfg.spacing=cfg.sheetSpacing=cfg.holeSpacing=0;
+  cfg.continuousRoundSeconds=0.2;
+  const auto sheet=rectangle(0,0,9,1,77);
+  auto part=rotatePolygon(rectangle(0,0,8,0.9999,1),-0.1);
+  part.allowedAngles.clear();defaultAllowedAngles(part,3600);
+  BackgroundRequest request;request.config=cfg;request.sheets={sheet};request.individual.placement={part};
+  bool complete=false;const auto started=std::chrono::steady_clock::now();
+  const auto result=runContinuousNesting(request,[&] {return complete || std::chrono::steady_clock::now()-started>std::chrono::seconds(5);},
+    [&](const auto&,const auto& run,size_t) {complete=run.placement.unplaced.empty();});
+  require(complete,"Dense seed permanently restricted the recursive angle policy");
+  valid(sheet,{part},result.placement,cfg);
+  require(part.allowedAngles.size()==3600,"Dense seed changed the caller's angle policy");
+}
+void lazyGpuMaskUploads() {
+  std::vector<GpuDeviceInfo> devices;try {devices=listGpuDevices();}catch(...) {return;}
+  if(devices.empty()) return;
+  GpuBitmap gpu(devices.front().index);
+  gpu.setSheet(4,1,std::vector<uint64_t>{15});gpu.setOccupancy(std::vector<uint64_t>{1});
+  gpu.allocateMasks(std::vector<GpuMaskInfo>{{1,1,1,0},{2,1,1,1}},2);
+  bool rejected=false;
+  try {gpu.filter(std::vector<GpuCandidate>{{1,0,0}});}catch(const std::invalid_argument&) {rejected=true;}
+  require(rejected,"GPU read uninitialized mask pixels");
+  gpu.uploadMaskRange(0,1,std::vector<uint64_t>{1});
+  require(gpu.filter(std::vector<GpuCandidate>{{0,0,0},{1,0,0}})==std::vector<uint8_t>({0,1}),"First lazy upload changed collision flags");
+  rejected=false;try {gpu.filterGrid(0,2,1,1,4,1,0,2);}catch(const std::invalid_argument&) {rejected=true;}
+  require(rejected,"Grid filtering accepted a missing mask range");
+  require(!gpu.selectOccupancySlot(1),"Fresh occupancy slot unexpectedly initialized");
+  gpu.setOccupancy(std::vector<uint64_t>{0});
+  gpu.uploadMaskRange(1,1,std::vector<uint64_t>{3});
+  require(gpu.selectOccupancySlot(0),"Lazy mask upload discarded a resident occupancy");
+  require(gpu.filter(std::vector<GpuCandidate>{{0,0,1},{1,0,1},{1,0,0}})==std::vector<uint8_t>({0,1,1}),"Lazy upload corrupted masks or resident occupancy");
+  gpu.toggleMask(0,2,0);
+  require(gpu.filter(std::vector<GpuCandidate>{{1,0,1}})==std::vector<uint8_t>({0}),"Incremental updates lost an earlier uploaded mask");
+  rejected=false;try {gpu.uploadMaskRange(1,1,std::vector<uint64_t>{});}catch(const std::invalid_argument&) {rejected=true;}
+  require(rejected,"Short GPU upload was accepted");
+}
 void residentGpuOccupancies() {
   std::vector<GpuDeviceInfo> devices;try {devices=listGpuDevices();}catch(...) {return;}
   if(devices.empty()) return;
@@ -804,10 +841,14 @@ void recursiveTreeAndGpuParity() {
 }
 int main(int argc,char** argv) {
   try {
+    if(argc==2 && std::string(argv[1])=="--dense-rotations-only") {
+      continuousDenseAnglesRetained();lazyGpuMaskUploads();refillSeedRasterRoundoff();
+      std::cout<<"Dense rotation regressions passed\n";return 0;
+    }
     if(argc==2 && std::string(argv[1])=="--raster-boundary-only") {
       refillSeedRasterRoundoff();std::cout<<"Raster boundary regression passed\n";return 0;
     }
-    refillSeedRasterRoundoff();concavePocketAngleCoverage();concavePocketRelocation();interlockingGroups();continuousContactPortfolio();incumbentRefill();residentGpuOccupancies();parallelRecursivePartitions();recursiveDuplicateSkipPruning();recursiveTreeAndGpuParity();restartAnchorAngles();timedSeedLeavesPortfolioBudget();sparseRejectionBudgetAndFailureEpochs();gpuOrderedBatchParity();stockObstaclesInBottomLeftSearch();fractionalHoleAndSheetMargins();modeSearchAndRefinement();bottomLeftSearch();scanlines();freeRectangleProof();mixedPanelsAndMultipleSheets();duplicateContours();holesFirst();rotatedAndMultipleHoles();concavePocket();rowsAndGpuPolicy();interrupted();mixedOneAngleWorkers();repeatedInsertsAfterHoleFills();singletonWindowExpansion();timedAlternatives();gpuFailurePolicy();gpuFastPathsWhenAvailable();
+    continuousDenseAnglesRetained();lazyGpuMaskUploads();refillSeedRasterRoundoff();concavePocketAngleCoverage();concavePocketRelocation();interlockingGroups();continuousContactPortfolio();incumbentRefill();residentGpuOccupancies();parallelRecursivePartitions();recursiveDuplicateSkipPruning();recursiveTreeAndGpuParity();restartAnchorAngles();timedSeedLeavesPortfolioBudget();sparseRejectionBudgetAndFailureEpochs();gpuOrderedBatchParity();stockObstaclesInBottomLeftSearch();fractionalHoleAndSheetMargins();modeSearchAndRefinement();bottomLeftSearch();scanlines();freeRectangleProof();mixedPanelsAndMultipleSheets();duplicateContours();holesFirst();rotatedAndMultipleHoles();concavePocket();rowsAndGpuPolicy();interrupted();mixedOneAngleWorkers();repeatedInsertsAfterHoleFills();singletonWindowExpansion();timedAlternatives();gpuFailurePolicy();gpuFastPathsWhenAvailable();
     std::cout<<"All nesting regression checks passed\n";return 0;
   } catch(const std::exception& e) {std::cerr<<e.what()<<"\n";return 1;}
 }

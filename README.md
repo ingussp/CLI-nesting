@@ -638,7 +638,15 @@ GPU setup for large batches:
 "gpu": {"enabled": true, "device": -1, "fallbackToCpu": true, "batchSize": 262144}
 ```
 
-Unique shape/orientation masks are uploaded once as an atlas (up to 512 MiB).
+The shared rotation atlas reserves up to 512 MiB, but pixel ranges are generated
+and uploaded only when recursion first reaches the corresponding shape/angle
+policy. Both recursive workers reuse each uploaded range. Filtering and reversible
+occupancy updates reject any mask whose pixels have not been uploaded yet.
+Rotated collision geometry does not duplicate the complete angle list or output
+metadata for every rotation; this avoids quadratic angle-policy memory growth.
+For continuous jobs with more than 360 allowed angles, only the initial fast seed
+uses an evenly sampled subset of 360 existing allowed angles. The recursive tree
+still searches the complete input angle list, including 3600-angle policies.
 The GPU generates implicit grid coordinates and filters up to 262144 candidates
 per dispatch; only one-byte validity flags are read back, not coordinate arrays.
 Flags stay on the CPU frame while its descendants are explored. GPU occupancy
