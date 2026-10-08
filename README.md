@@ -228,7 +228,7 @@ These keys are accepted in settings, config or CLI-nesting.
 |---|---|---|
 | `mode` | Inferred, normally first | first, timed, continuous; controls duration and saving behavior below |
 | `timeLimitSeconds` | 0 | 0..86400, including fractions; timed requires a positive total budget, first requires 0, continuous ignores it |
-| `continuousRoundSeconds` | 30 | 0.01..86400; budget per timed/continuous restart. Too short can spend every restart on preparation |
+| `continuousRoundSeconds` | 30 | 0.01..86400; timed restart budget; continuous uses this only for its initial fast layout |
 | `continuous` | false | Legacy boolean; without mode, true selects continuous. With mode it must agree: true only for continuous |
 | `threads` | Hardware logical CPU count, at least 1 | Explicit integer 1..256; CPU search worker budget. Driver/OS threads are separate and serial phases cannot use all workers |
 | `trials` | 2 | Integer 1..4: compact, then holes_first_rows, large_first, small_first. More strategies cost more time/memory. First mode and jobs with fewer than six copies and no part holes use one |
@@ -265,7 +265,7 @@ waste, then the smallest occupied bounding rectangle. The chosen index is
 reported as `selectedTrial`, and each strategy's count, duration, completion and
 phase timings appear in `strategyResults`.
 
-`trials` takes effect only in `mode: "timed"` and `mode: "continuous"`.
+`trials` controls the timed portfolio. Continuous combines a persistent recursive tree with CPU contact trials for larger jobs.
 Mode `first` runs the single `first_bottom_left` strategy described below and ignores `trials`.
 Jobs with fewer than six part copies and no part holes also use one strategy.
 Small jobs containing part holes retain the requested alternatives: even one
@@ -316,8 +316,8 @@ starting another session. Do not keep the input inside that results directory.
 The first validated candidate establishes a baseline, possibly partial. Strict
 improvements are saved as results/result1.json, result2.json, etc., with matching
 .dxf/.svg when enabled. Equal/worse candidates produce no new files. Search
-continues after all parts fit and after rounds with no improvement. There is no
-overall deadline. Output basenames are ignored here; the fixed resultN names apply.
+continues after all parts fit, exploring alternative positions and rotations. It ends
+on cancellation or finite raster-tree exhaustion. There is no overall deadline. Output basenames are ignored here; the fixed resultN names apply.
 
 Files are written completely under temporary names, then companions are
 published before the final JSON. That JSON marks a completed result group.
@@ -509,7 +509,7 @@ input option is needed. This heuristic can still miss feasible pockets.
 `mode: "timed"` first retains the same fast layout, then compares different part
 orders, permitted orientations and contact/compact strategies until the shared
 time limit. `continuous` keeps searching until cancellation. Search rounds after
-the initial layout use `continuousRoundSeconds` as their budget. Ranking
+the initial layout use `continuousRoundSeconds` in timed mode; continuous traverses partitioned recursive branches without restarts. Ranking
 prioritizes fewer unplaced parts, then less used-sheet waste, then compactness.
 Only improvements replace the incumbent. A finite time budget does not enumerate
 all permutations or prove an optimum. `searchIterations` reports attempted
@@ -538,10 +538,9 @@ and successful passes. Only then does the strategy open the next sheet.
 
 Repeated-part NFP and pair-pattern proposals include the configured part spacing;
 raw touching-contour vertices are insufficient when that spacing is positive.
-Exact geometry remains authoritative. Timed/continuous restarts cycle through
-permitted anchor orientations as well as perturbing the part order. With
-`rotations: 360`, the permitted orientations are one degree apart; this does not
-enumerate every combination of angles, orders and positions recursively.
+Exact geometry remains authoritative. Timed restarts cycle permitted anchor angles
+and perturb part order. Continuous enumerates a finite placement tree at the
+configured raster resolution and step; 360 rotations means one-degree increments.
 
 CPU candidate batches can include multiple rotations while pinning their masks
 within the lazy raster cache budget. `threads: 12` supplies at most 12 execution
@@ -562,3 +561,152 @@ ctest --test-dir build-release -C Release --output-on-failure
 ```
 
 Python 3.8 or newer is needed for the protocol and quality-example tests.
+
+
+
+### Hybrid continuous mode
+
+`mode: "continuous"` saves a fast seed first. With at least 16 part instances and
+at least two configured workers, it then combines the persistent recursive grid
+with independent CPU contact trials. Up to two workers service the recursive
+component (and its shared GPU); the remaining workers explore fresh arrangements
+and repair copies of the shared incumbent. With 12 threads this is 2 + 10.
+Smaller jobs and one-thread runs retain the finite recursive search alone.
+
+Contact trials propose clearance-offset NFP boundary positions for repeated and
+mixed shapes, then apply bitmap and exact contour/clearance validation. A shifted
+sample of up to 12 allowed orientations keeps each CPU trial bounded; all input
+angles remain eligible in the recursive component. Trials alternate row-first and column-first ordering, changing early
+placement choices and input order. The angle variation advances independently
+of the trial family, avoiding repeated families that miss the same orientations. Contact/repair trials have a three-second
+budget; repeated-group trials have five seconds. Time limits are cooperative.
+The incumbent is shared under a mutex and only strict improvements are saved.
+
+Repeated groups use a beam of up to four partial arrangements, extended through
+pair-contact positions to at most eight members. Only a bounded candidate
+shortlist is checked, so this is not exhaustive group optimization. Repeated
+groups can interlock: clearance NFP intersections propose smaller horizontal and
+vertical pitches, with optional alternating row offsets. Exact contours certify
+all potentially interacting neighbouring cells, including diagonals and further
+rows. Group bounding rectangles may overlap. Edge rows and columns are counted
+using the full group footprint, so a shorter pitch does not extend the pattern
+past the sheet margin. Each individual placement is checked again against the
+actual sheet and other parts.
+Alternative one/two-part motifs rotate between trials before extending the beam.
+Optional group preparation gets at most two seconds of a five-second helper
+trial; the last certified pattern is retained on preparation timeout. The pitch
+search samples quarter-row offsets and limits compression to one quarter of the
+group footprint. It is a bounded heuristic, not exhaustive lattice optimization.
+Parts with holes retain their full geometry during validation and hole insertion.
+
+Logs include `Contact trial` entries (`nfp`, `group`, `repair`), plus a final
+`Contact finished` summary. JSON uses `bitmapSearch: "hybrid-contact"` and
+`contactSearch` counters. Intermediate counters describe the winning trial;
+`maxInterlockingCapacity` reports the largest certified contour-fitting pattern
+capacity, not the number ultimately placed (sheet holes or bitmap checks can
+reject proposed positions). Group trial log lines include `interlockingCapacity`.
+`Contact finished` aggregates all completed companion trials. A combined run is never marked globally exhausted.
+CPU and GPU utilization depend on the input; allocated workers do not imply
+constant hardware utilization. First and timed search behavior is unchanged.
+
+The recursive component works as follows. Each tree level selects
+one input part, tries every sheet, allowed orientation and raster-grid origin,
+then explores the next part. Failed alternatives backtrack; an explicit stack
+avoids C++ call-stack overflow. A skip branch permits best partial layouts.
+Identical geometry/rotation policies use canonical position order to eliminate
+copy permutations. A placed-count bound prunes branches that cannot beat the
+incumbent count. Fitting every part does not stop compactness optimization.
+
+Positions are separated by `resolution * bitmapSearchStepPx` millimetres. This
+is exhaustive over the eligible finite raster tree, not all real-valued positions;
+conservative raster filtering can omit geometrically feasible contacts. Search
+complexity is exponential. The initial heuristic layout remains the incumbent
+unless the tree produces a strictly better layout. No time-based restart discards
+recursive progress. `continuousRoundSeconds` bounds only initial seed construction.
+
+GPU setup for large batches:
+
+```json
+"mode": "continuous",
+"gpu": {"enabled": true, "device": -1, "fallbackToCpu": true, "batchSize": 262144}
+```
+
+Unique shape/orientation masks are uploaded once as an atlas (up to 512 MiB).
+The GPU generates implicit grid coordinates and filters up to 262144 candidates
+per dispatch; only one-byte validity flags are read back, not coordinate arrays.
+Flags stay on the CPU frame while its descendants are explored. GPU occupancy
+is updated by reversible XOR kernels. Worker occupancy buffers remain on the GPU
+when switching workers; only new or evicted buffers need a full upload. Cached
+occupancies are bounded to 128 MiB or 1/16 of GPU memory, whichever is smaller
+(the active bitmap can exceed this cache budget). Switching sheets invalidates
+the occupancy cache. The rotation atlas remains shared. CPU performs exact contour, hole and
+clearance checks and controls branching. This does not promise 100% GPU load.
+GPU failure follows the configured CPU-fallback policy.
+
+Saved candidates include `recursiveSearch.nodes`, `backtracks`, `maxDepth` and
+`exhausted`. The final console summary reports total work even when recursion
+never beats the seed. Exhaustion refers to this raster search, not a proof of the
+continuous geometric optimum. The first/timed modes retain their algorithms.
+
+Regression tests cover full tiny-tree traversal, backtracking, skipped parts,
+hole insertion, multiple sheets, cancellation, allowed angles, CPU/GPU equality
+and equal layouts across different GPU batch sizes. Run in an x64 MSVC environment:
+
+```powershell
+cmake --build build-test --parallel 6
+ctest --test-dir build-test --output-on-failure -j 1
+```
+
+
+Continuous duplicate-copy pruning: once a copy is skipped in a branch, later
+copies with exactly the same geometry and angle policy are excluded in that
+branch. They cannot improve it by exchanging instance IDs. This exclusion is
+undone on backtracking; different shapes/angle policies are still searched.
+`recursiveSearch.duplicateSkips` reports eliminated duplicate instances.
+
+`recursive-progress.log` is appended beside the input JSON, separately from the
+best-result history. Every approximately five seconds during recursive traversal
+it records depth, best count, nodes, backtracks, duplicate skips, GPU batches and
+candidates, and vector checks. Driver calls can delay a progress entry. Each run
+has a job marker and final cancellation/exhaustion status. Improvement snapshots
+now report `stopReason: "searching"`; they no longer imply completed traversal.
+
+Parallel recursive search uses up to `min(threads, first-part angle count)` CPU
+workers. Each owns a disjoint range of the first part's allowed angles; all later
+parts keep every allowed angle. Only the first worker explores skipping the first
+part. Work is statically partitioned, without work stealing. Independent CPU
+geometry checks run concurrently; a FIFO broker serializes large GPU batches
+through one OpenCL context and one shared mask atlas. This can still leave GPU
+idle time during CPU validation, and does not guarantee a speedup on every input.
+
+Progress lines identify `worker` and `rootAngles` (angle-list index and count).
+Final counters aggregate all workers; intermediate winning-layout counters belong
+to the worker that found it. Full exhaustion requires every worker to finish.
+For initial tests use 360 rotations (1 degree); 3600 remains supported (0.1 degree)
+but increases both preprocessing and the search space.
+
+Recursive GPU timing diagnostics: `gpuWaitMs` measures time waiting for the shared
+GPU broker; `gpuUpdateMs` measures host time selecting/updating device bitmaps;
+`gpuDispatchMs` includes kernel dispatch and blocking flag readback (it is not
+GPU-only kernel time). `gpuUploadBytes` counts full occupancy uploads, excluding
+the initial rotation atlas and sheet material. These are cumulative per worker.
+Parallel workers poll the shared cancellation hook at most once per 20 ms rather
+than taking its shared lock for every pairwise geometry test. This avoids
+unnecessary serialization while retaining cooperative cancellation.
+
+Recursive frames start with at most 4096 candidates per batch. When the frame
+consumes that range, its next batch doubles up to `gpu.batchSize`. New sheets
+reset the size. This avoids preparing a large unused suffix before descending
+into a feasible branch, while sparse searches still use the configured maximum.
+The candidate order and finite search tree remain unchanged.
+
+Incumbent repair (used by the CPU companion trials in hybrid continuous search):
+`refillBitmapLayout` compacts a copy of a validated layout, optionally releases a
+small neighbourhood, and tries CPU refill using rotating angle shortlists plus
+the removed parts' original orientations. Callers must compare the returned
+candidate against the incumbent and discard regressions. Regression tests cover
+refill after compaction, unchanged input, neighbourhood repair, and cancellation.
+The `repair_saved_layout` test executable accepts an input JSON, an already
+validated result JSON, and an output path. It runs 160 repair attempts, retaining
+only strict improvements. For the 132-star fixture it improved compactness only;
+it did not place another star. The standalone executable remains a research tool, not a new CLI mode.

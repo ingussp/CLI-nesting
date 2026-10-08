@@ -365,7 +365,7 @@ void mixedPanelsAndMultipleSheets() {
   sameLayout(cpu,gpu);
 }
 void restartAnchorAngles() {
-  auto cfg=settings();cfg.mode=SearchMode::Continuous;cfg.bitmapPatternTrial=false;
+  auto cfg=settings();cfg.mode=SearchMode::Timed;cfg.bitmapPatternTrial=false;
   auto sheet=rectangle(0,0,150,100,99);
   std::vector<Polygon> parts;
   for(int i=1;i<=5;++i) {auto p=rectangle(0,0,20,8,i);p.allowedAngles={0,45,90,135};parts.push_back(p);}
@@ -501,9 +501,219 @@ void timedSeedLeavesPortfolioBudget() {
     require(rejected,"Invalid cache memory budget was accepted");
   }
 }
+void interlockingGroups() {
+  auto cfg=settings();cfg.spacing=cfg.holeSpacing=1;cfg.sheetSpacing=2;
+  cfg.bitmapGroupTrial=true;cfg.bitmapNfpContacts=true;cfg.timeLimitSeconds=5;
+  auto sheet=rectangle(0,0,110,110,77);std::vector<Polygon> parts;
+  for(int i=0;i<100;++i) {
+    auto p=rectangle(0,0,20,20,i+1);
+    p.points={{8,0,true},{12,0,true},{12,8,true},{20,8,true},{20,12,true},{12,12,true},
+              {12,20,true},{8,20,true},{8,12,true},{0,12,true},{0,8,true},{8,8,true}};
+    parts.push_back(p);
+  }
+  BitmapNestingStats stats;
+  const auto result=placePartsBitmap({sheet},parts,cfg,&stats);
+  std::cout<<"Interlocking crosses: placed="<<parts.size()-result.unplaced.size()<<" capacity="<<stats.maxInterlockingCapacity<<'\n';
+  require(stats.maxInterlockingCapacity>25,"Cross groups still use disjoint bounding boxes");
+  require(parts.size()-result.unplaced.size()>25,"Contour-fitting groups did not improve on the rectangular grid");
+  require(parts.size()-result.unplaced.size()>=stats.maxInterlockingCapacity,"Certified cross pattern did not fit on its sheet");
+  // Exhaustive reference checks include non-adjacent rows and diagonals, and
+  // assert positive part clearance and the margin on every sheet edge.
+  valid(sheet,parts,result,cfg);
+  cfg.bitmapResolutionMm=0.5;cfg.sheetSpacing=2.25;cfg.spacing=1.2;cfg.holeSpacing=3.2;
+  sheet=rectangle(0,0,113,87,77);
+  for(auto& p:parts) p.children.push_back(rectangle(9,9,2,2));
+  const auto holed=placePartsBitmap({sheet},parts,cfg,&stats);
+  require(stats.maxInterlockingCapacity>15,"Holed groups did not interlock with fractional clearances");
+  valid(sheet,parts,holed,cfg);
+}
+void continuousContactPortfolio() {
+  auto cfg=settings();cfg.spacing=cfg.sheetSpacing=cfg.holeSpacing=0;
+  cfg.mode=SearchMode::First;cfg.bitmapNfpContacts=true;cfg.bitmapGroupTrial=true;
+  auto sheet=rectangle(0,0,12,8,77);std::vector<Polygon> parts;
+  for(int i=0;i<24;++i) {auto p=rectangle(0,0,2,1,i+1);p.allowedAngles={0,90};parts.push_back(p);}
+  BitmapNestingStats stats;
+  const auto group=placePartsBitmap({sheet},parts,cfg,&stats);
+  require(stats.maxPatternGroupSize==8,"Repeated group beam did not reach eight members");
+  valid(sheet,parts,group,cfg);
+  BackgroundRequest request;request.sheets={sheet};request.individual.placement=parts;
+  request.config=cfg;request.config.threads=4;request.config.continuousRoundSeconds=0.02;
+  std::atomic<bool> stop{false};std::atomic<int> trials{0};
+  request.config.searchProgress=[&](const std::string& line) {
+    if(line.find("Contact trial:")==0 && ++trials>=2) stop=true;
+  };
+  const auto started=std::chrono::steady_clock::now();size_t bestCount=0;
+  const auto result=runContinuousNesting(request,[&] {return stop.load() || std::chrono::steady_clock::now()-started>std::chrono::seconds(5);},
+    [&](const auto&,const auto& run,size_t) {
+      const auto count=parts.size()-run.placement.unplaced.size();
+      require(count>=bestCount,"Hybrid search replaced its incumbent with fewer parts");bestCount=count;
+      valid(sheet,parts,run.placement,cfg);
+    });
+  require(trials>=2 && result.bitmapStats.continuousPortfolio,"Continuous CPU contact workers did not run");
+  require(result.bitmapStats.contactTrials+result.bitmapStats.groupTrials+result.bitmapStats.localRepairTrials>=2,
+          "Hybrid final counters lost contact trials");
+  require(result.bitmapStats.cpuWorkersUsed==4 && !result.bitmapStats.recursiveExhausted,"Hybrid worker/exhaustion accounting is wrong");
+  valid(sheet,parts,result.placement,cfg);
+}
+void incumbentRefill() {
+  auto cfg=settings();cfg.spacing=cfg.sheetSpacing=cfg.holeSpacing=0;
+  cfg.timeLimitSeconds=2;cfg.searchIteration=0;
+  auto sheet=rectangle(0,0,3,1,77);
+  std::vector<Polygon> parts{rectangle(0,0,1,1,1),rectangle(0,0,1,1,2),rectangle(0,0,1,1,3)};
+  Placement a;a.id=1;Placement b;b.id=2;b.x=2;
+  PlacementResult initial;initial.placements.push_back({sheet.source,sheet.id,{a,b}});
+  initial.area=2;initial.totalarea=3;initial.unplaced={parts[2]};
+  BitmapNestingStats stats;
+  const auto filled=refillBitmapLayout({sheet},parts,initial,cfg,&stats);
+  require(filled.unplaced.empty() && stats.refillPlacements==1,"Compacted incumbent was not refilled");
+  valid(sheet,parts,filled,cfg);
+  require(initial.placements.front().sheetplacements[1].x==2 && initial.unplaced.size()==1,
+          "Refill mutated the live incumbent");
+  cfg.searchIteration=1;
+  const auto repaired=refillBitmapLayout({sheet},parts,filled,cfg,&stats);
+  valid(sheet,parts,repaired,cfg);
+  cfg.stopRequested=[]{return true;};
+  const auto stopped=refillBitmapLayout({sheet},parts,initial,cfg,&stats);
+  require(stats.cancelled,"Incumbent repair ignored cancellation");
+  valid(sheet,parts,stopped,cfg);
+}
+void residentGpuOccupancies() {
+  std::vector<GpuDeviceInfo> devices;try {devices=listGpuDevices();}catch(...) {return;}
+  if(devices.empty()) return;
+  GpuBitmap gpu(devices.front().index);
+  const std::vector<uint64_t> material{3},empty{0},occupied{1};
+  gpu.setSheet(2,1,material);
+  gpu.setMasks(std::vector<GpuMaskInfo>{{1,1,1,0}},std::vector<uint64_t>{1});
+  const std::vector<GpuCandidate> candidates{{0,0,0},{1,0,0}};
+  require(!gpu.selectOccupancySlot(0),"Fresh GPU slot was marked initialized");
+  gpu.setOccupancy(occupied);
+  require(!gpu.selectOccupancySlot(1),"New worker inherited another worker's bitmap");
+  gpu.setOccupancy(empty);
+  require(gpu.filter(candidates)==std::vector<uint8_t>({1,1}),"Empty worker bitmap changed");
+  for(int i=0;i<20;++i) {
+    require(gpu.selectOccupancySlot(0),"Resident worker bitmap was lost");
+    require(gpu.filter(candidates)==std::vector<uint8_t>({0,1}),"Worker occupancy was corrupted");
+    gpu.toggleMask(0,1,0);
+    require(gpu.filter(candidates)==std::vector<uint8_t>({0,0}),"Resident XOR update was lost");
+    gpu.toggleMask(0,1,0);
+    require(gpu.selectOccupancySlot(1),"Second worker bitmap was lost");
+    require(gpu.filter(candidates)==std::vector<uint8_t>({1,1}),"XOR crossed worker boundaries");
+  }
+  gpu.setSheet(2,1,material);
+  require(!gpu.selectOccupancySlot(1),"Changing sheets retained a stale worker bitmap");
+  gpu.setOccupancy(empty);
+  require(!gpu.selectOccupancySlot(0),"Changing sheets failed to invalidate all slots");
+  gpu.setOccupancy(empty);
+  require(gpu.filter(candidates)==std::vector<uint8_t>({1,1}),"Sheet reset restored stale occupancy");
+}
+void parallelRecursivePartitions() {
+  auto cfg=settings();cfg.mode=SearchMode::Continuous;
+  cfg.spacing=cfg.sheetSpacing=cfg.holeSpacing=0;
+  auto sheet=rectangle(0,0,3,2,999);
+  std::vector<Polygon> parts;
+  for(int i=0;i<4;++i) {auto p=rectangle(0,0,2,1,i+1);p.allowedAngles={0,90};parts.push_back(p);}
+  BitmapNestingStats serialStats,parallelStats;
+  const auto serial=placePartsBitmap({sheet},parts,cfg,&serialStats);
+  auto check=[&](const PlacementResult& result,const BitmapNestingStats& stats) {
+    require(stats.recursiveExhausted && stats.cpuWorkersUsed==2,"Root partitions did not both complete");
+    const auto a=layoutQuality({sheet},serial,serialStats),b=layoutQuality({sheet},result,stats);
+    require(!improvesLayout(a,b)&&!improvesLayout(b,a),"Parallel partitions changed the exhaustive optimum");
+    valid(sheet,parts,result,cfg);
+  };
+  cfg.threads=2;
+  check(placePartsBitmap({sheet},parts,cfg,&parallelStats),parallelStats);
+  std::vector<GpuDeviceInfo> devices;try {devices=listGpuDevices();}catch(...) {return;}
+  if(devices.empty()) return;
+  cfg.gpuEnabled=true;cfg.gpuFallbackToCpu=false;cfg.gpuDevice=devices.front().index;
+  const auto gpu=placePartsBitmap({sheet},parts,cfg,&parallelStats);check(gpu,parallelStats);
+  require(parallelStats.gpuCandidates>0,"Shared GPU dispatcher was bypassed");
+  auto oversized=rectangle(0,0,10,10,5);oversized.allowedAngles={0,90};
+  const auto skipped=placePartsBitmap({sheet},{oversized,parts[0]},cfg,&parallelStats);
+  require(skipped.unplaced.size()==1 && parallelStats.recursiveExhausted,"Partitioned search lost the root skip branch");
+  cfg.stopRequested=[]{return true;};placePartsBitmap({sheet},parts,cfg,&parallelStats);
+  require(parallelStats.cancelled,"Parallel GPU cancellation was ignored");
+}
+void recursiveDuplicateSkipPruning() {
+  auto cfg=settings();cfg.mode=SearchMode::Continuous;
+  cfg.spacing=cfg.sheetSpacing=cfg.holeSpacing=0;
+  const auto sheet=rectangle(0,0,1,1,9999);
+  std::vector<Polygon> parts;
+  for(int id=1;id<=1000;++id) parts.push_back(rectangle(0,0,1,1,id));
+  BitmapNestingStats stats;
+  const auto result=placePartsBitmap({sheet},parts,cfg,&stats);
+  require(result.unplaced.size()==999 && stats.recursiveExhausted,"Repeated-copy pruning changed the optimum");
+  require(stats.recursiveDuplicateSkips>=998 && stats.recursiveMaxDepth<=3,
+          "Identical skip branches still descend through all remaining copies");
+  require(stats.recursiveBacktracks>0 && stats.candidatesExamined<10,
+          "Repeated copies postponed backtracking or repeated the same grid");
+  valid(sheet,parts,result,cfg);
+  // A skipped large copy must not hide a later different shape or angle policy.
+  auto large=rectangle(0,0,3,2,1);auto rotated=large;rotated.id=3;rotated.allowedAngles={90};
+  parts={large,rectangle(0,0,1,1,2),rotated};
+  const auto narrow=rectangle(0,0,2,4,9999);
+  const auto mixed=placePartsBitmap({narrow},parts,cfg,&stats);
+  require(mixed.unplaced.size()==1,"Skip pruning conflated geometry or rotation policies");
+  valid(narrow,parts,mixed,cfg);
+}
+void recursiveTreeAndGpuParity() {
+  auto cfg=settings();cfg.mode=SearchMode::Continuous;
+  cfg.spacing=cfg.sheetSpacing=cfg.holeSpacing=0;
+  auto sheet=rectangle(0,0,3,2,99);
+  std::vector<Polygon> parts{rectangle(0,0,1,1,1),rectangle(0,0,1,1,2),rectangle(0,0,2,2,3)};
+  BitmapNestingStats stats;
+  const auto cpu=placePartsBitmap({sheet},parts,cfg,&stats);
+  require(stats.recursiveExhausted&&stats.recursiveBacktracks>0&&stats.recursiveMaxDepth==3,
+          "Recursive search did not traverse and backtrack the full finite tree");
+  require(cpu.unplaced.empty(),"Recursive tree missed a feasible full layout");valid(sheet,parts,cpu,cfg);
+  auto rotated=rectangle(0,0,3,2,4);rotated.allowedAngles={0,90};
+  const auto rotationResult=placePartsBitmap({rectangle(0,0,2,3,98)},{rotated},cfg);
+  require(rotationResult.unplaced.empty() && rotationResult.placements.front().sheetplacements.front().rotation==90,
+          "Recursive tree omitted a required allowed orientation");
+  const auto skipped=placePartsBitmap({sheet},{rectangle(0,0,10,10,4),parts.front()},cfg);
+  require(skipped.unplaced.size()==1 && skipped.placements.front().sheetplacements.size()==1,
+          "Skip branch prevented later feasible parts from being placed");
+  cfg.spacing=1;
+  const auto gapSheet=rectangle(0,0,4,1,97);
+  const std::vector<Polygon> gapParts{parts[0],parts[1]};
+  const auto gaps=placePartsBitmap({gapSheet},gapParts,cfg,&stats);
+  require(gaps.unplaced.empty() && stats.vectorValidationRejects>0,"Recursive tree did not enforce vector spacing");
+  valid(gapSheet,gapParts,gaps,cfg);cfg.spacing=0;
+  // Hole insertion and nonzero stock origin survive bitmap undo and mask reuse.
+  auto ring=rectangle(0,0,3,3,1);ring.children.push_back(rectangle(1,1,1,1));
+  auto holeSheet=rectangle(4,7,3,3,88);
+  const std::vector<Polygon> holeParts{ring,rectangle(0,0,1,1,2)};
+  const auto holeResult=placePartsBitmap({holeSheet},holeParts,cfg);
+  require(holeResult.unplaced.empty(),"Recursive search missed the ring insert");valid(holeSheet,holeParts,holeResult,cfg);
+  cfg.stopRequested=[]{return true;};placePartsBitmap({sheet},parts,cfg,&stats);
+  require(stats.cancelled&&!stats.recursiveExhausted,"Recursive cancellation was ignored");cfg.stopRequested={};
+  std::vector<GpuDeviceInfo> devices;try {devices=listGpuDevices();}catch(...) {return;}
+  if(devices.empty()) return;
+  cfg.gpuEnabled=true;cfg.gpuFallbackToCpu=false;cfg.gpuDevice=devices.front().index;
+  const auto gpu=placePartsBitmap({sheet},parts,cfg,&stats);
+  require(stats.gpuCandidates>0&&stats.recursiveExhausted,"GPU recursion did not execute");sameLayout(cpu,gpu);
+  cfg.sheetSpacing=1;
+  const auto marginSheet=rectangle(0,0,4,4,96);
+  const auto marginGpu=placePartsBitmap({marginSheet},gapParts,cfg);
+  cfg.gpuEnabled=false;const auto marginCpu=placePartsBitmap({marginSheet},gapParts,cfg);
+  sameLayout(marginCpu,marginGpu);valid(marginSheet,gapParts,marginGpu,cfg);
+  cfg.gpuEnabled=true;cfg.sheetSpacing=0;
+  const std::vector<Polygon> boards{rectangle(0,0,2,1,90),rectangle(5,7,2,1,91)};
+  const std::vector<Polygon> copies{rectangle(0,0,1,1,1),rectangle(0,0,1,1,2),rectangle(0,0,1,1,3)};
+  const auto multiGpu=placePartsBitmap(boards,copies,cfg);
+  cfg.gpuEnabled=false;const auto multiCpu=placePartsBitmap(boards,copies,cfg);
+  sameLayout(multiCpu,multiGpu);require(multiGpu.unplaced.empty(),"GPU backtracking across sheets lost a copy");
+  cfg.gpuEnabled=true;
+  sheet=rectangle(0,0,5000,1,99);parts={rectangle(0,0,12,1,1)};
+  cfg.gpuBatchSize=256;BitmapNestingStats small,large;
+  const auto a=placePartsBitmap({sheet},parts,cfg,&small);
+  cfg.gpuBatchSize=262144;const auto b=placePartsBitmap({sheet},parts,cfg,&large);
+  sameLayout(a,b);require(large.gpuBatches<small.gpuBatches,"Large recursive GPU batches did not reduce dispatches");
+  require(large.recursiveExhausted && large.recursiveNodes==small.recursiveNodes && large.recursiveNodes>4096,
+          "Growing GPU batches skipped or repeated part of the recursive grid");
+}
 int main() {
   try {
-    restartAnchorAngles();timedSeedLeavesPortfolioBudget();sparseRejectionBudgetAndFailureEpochs();gpuOrderedBatchParity();stockObstaclesInBottomLeftSearch();fractionalHoleAndSheetMargins();modeSearchAndRefinement();bottomLeftSearch();scanlines();freeRectangleProof();mixedPanelsAndMultipleSheets();duplicateContours();holesFirst();rotatedAndMultipleHoles();concavePocket();rowsAndGpuPolicy();interrupted();mixedOneAngleWorkers();repeatedInsertsAfterHoleFills();singletonWindowExpansion();timedAlternatives();gpuFailurePolicy();gpuFastPathsWhenAvailable();
+    interlockingGroups();continuousContactPortfolio();incumbentRefill();residentGpuOccupancies();parallelRecursivePartitions();recursiveDuplicateSkipPruning();recursiveTreeAndGpuParity();restartAnchorAngles();timedSeedLeavesPortfolioBudget();sparseRejectionBudgetAndFailureEpochs();gpuOrderedBatchParity();stockObstaclesInBottomLeftSearch();fractionalHoleAndSheetMargins();modeSearchAndRefinement();bottomLeftSearch();scanlines();freeRectangleProof();mixedPanelsAndMultipleSheets();duplicateContours();holesFirst();rotatedAndMultipleHoles();concavePocket();rowsAndGpuPolicy();interrupted();mixedOneAngleWorkers();repeatedInsertsAfterHoleFills();singletonWindowExpansion();timedAlternatives();gpuFailurePolicy();gpuFastPathsWhenAvailable();
     std::cout<<"All nesting regression checks passed\n";return 0;
   } catch(const std::exception& e) {std::cerr<<e.what()<<"\n";return 1;}
 }

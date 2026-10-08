@@ -16,9 +16,11 @@ LayoutQuality layoutQuality(const std::vector<Polygon>& sheets,const PlacementRe
 bool improvesLayout(const LayoutQuality& candidate,const LayoutQuality& incumbent);
 
 using ImprovementCallback=std::function<void(const BackgroundRequest&,const OrchestratorRunStats&,size_t)>;
-// Blocks until the thread-safe stop predicate is true. Serializes improvement callbacks.
-// Each restart varies part order and angle priority without changing allowed orientations.
-void runContinuousNesting(BackgroundRequest request,const std::function<bool()>& stop,
+// Save a fast seed, then combine persistent grid search with CPU contact trials
+// for jobs with at least 16 parts and two workers. Smaller jobs traverse the grid
+// until stopped
+// or the finite raster search is exhausted. Improvement callbacks are serialized.
+OrchestratorRunStats runContinuousNesting(BackgroundRequest request,const std::function<bool()>& stop,
                           const ImprovementCallback& onImprovement);
 // Optimize until the shared deadline and return the best candidate.
 OrchestratorRunStats runTimedNesting(BackgroundRequest request,const std::function<bool()>& stop);

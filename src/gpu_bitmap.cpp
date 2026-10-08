@@ -7,6 +7,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <utility>
+#include <unordered_map>
 #ifdef _WIN32
 #define NOMINMAX
 #include <windows.h>
@@ -138,18 +139,30 @@ __kernel void collision(__global const ulong* occupied, __global const ulong* ma
                         __global const Mask* masks, __global const ulong* bits,
                         __global const Candidate* candidates, __global uchar* output,
                         uint sw,uint sh,uint stride,uint rotations,uint count,
-                        uint mode,ulong first,uint rows,uint step,uint ww,uint wh) {
+                        uint mode,ulong first,uint rows,uint step,uint ww,uint wh,uint firstMask,uint maskCount,uint originX,uint originY) {
   uint i=get_global_id(0); if(i>=count) return;
   int x,y; uint r;
   if(mode) {
     ulong p=first+(ulong)i;
-    r=(uint)(p%rotations); p/=rotations;
-    y=(int)(p%rows)*step; x=(int)(p/rows)*step;
+    r=firstMask+(uint)(p%maskCount); p/=maskCount;
+    y=(int)(p%rows)*step+originY; x=(int)(p/rows)*step+originX;
   } else { Candidate c=candidates[i]; x=c.x; y=c.y; r=c.rotation; }
   if(r>=rotations || x<0 || y<0) { output[i]=0; return; }
   Mask m=masks[r];
   if(m.width>ww || m.height>wh || (uint)x>ww-m.width || (uint)y>wh-m.height) { output[i]=0; return; }
   output[i]=fits(occupied,material,masks,bits,sw,sh,stride,rotations,x,y,r);
+}
+// One work item owns one destination word, so no atomic operations are needed.
+__kernel void toggle_mask(__global ulong* occupied,__global const Mask* masks,
+                          __global const ulong* bits,uint stride,uint rotation,int x,int y) {
+  Mask m=masks[rotation];uint shift=(uint)x&63,word=(uint)x>>6;
+  uint needed=(m.width+shift+63)/64;
+  uint index=get_global_id(0),row=index/needed,w=index%needed;
+  if(row>=m.height) return;
+  uint src=m.offset+row*m.stride;
+  ulong value=w<m.stride ? bits[src+w] : 0;
+  if(shift) value=(value<<shift)|(w && w-1<m.stride ? bits[src+w-1]>>(64-shift) : 0);
+  occupied[((uint)y+row)*stride+word+w]^=value;
 }
 )CLC";
 }
@@ -162,17 +175,27 @@ struct GpuBitmap::Impl {
   cl_context context{};
   cl_command_queue queue{};
   cl_program program{};
-  cl_kernel kernel{};
+  cl_kernel kernel{},toggleKernel{};
+  std::vector<GpuMaskInfo> maskInfo;
   cl_mem material{},occupancy{},masks{},bits{},candidates{},output{};
   size_t capacity=0, sheetBytes=0;
   bool occupancyReady=false;
+  uint64_t occupancySlot=0;
+  struct SavedOccupancy {cl_mem memory;bool ready;};
+  std::unordered_map<uint64_t,SavedOccupancy> savedOccupancies;
+  void clearSavedOccupancies() {
+    for(const auto& [slot,saved]:savedOccupancies) api.clReleaseMemObject(saved.memory);
+    savedOccupancies.clear();
+  }
   cl_ulong maxAllocation=0;
   cl_uint width=0,height=0,stride=0,rotations=0;
   // Release OpenCL buffers, kernels, queues and context.
   ~Impl() {
     if(queue) api.clFinish(queue);
+    clearSavedOccupancies();
     for(auto m:{material,occupancy,masks,bits,candidates,output}) if(m) api.clReleaseMemObject(m);
     if(kernel) api.clReleaseKernel(kernel);
+    if(toggleKernel) api.clReleaseKernel(toggleKernel);
     if(program) api.clReleaseProgram(program);
     if(queue) api.clReleaseCommandQueue(queue);
     if(context) api.clReleaseContext(context);
@@ -202,6 +225,7 @@ struct GpuBitmap::Impl {
       throw std::runtime_error("OpenCL kernel compilation failed: "+log);
     }
     kernel=api.clCreateKernel(program,"collision",&e); check(e,"create kernel");
+    toggleKernel=api.clCreateKernel(program,"toggle_mask",&e); check(e,"create toggle kernel");
   }
   // Replace a GPU buffer with data sized for the next upload.
   void replace(cl_mem& memory,size_t bytes,cl_mem_flags flags,const void* data=nullptr) {
@@ -215,7 +239,7 @@ struct GpuBitmap::Impl {
   template<class T> void arg(cl_uint index,const T& value) { check(api.clSetKernelArg(kernel,index,sizeof(value),&value),"kernel argument"); }
   // Execute a collision kernel and read back candidate validity flags.
   std::vector<uint8_t> run(uint32_t count,uint32_t mode,uint64_t first,uint32_t rows,uint32_t step,uint32_t ww,uint32_t wh,
-                         std::span<const GpuCandidate> input={}) {
+                         std::span<const GpuCandidate> input={},uint32_t firstMask=0,uint32_t maskCount=0,uint32_t originX=0,uint32_t originY=0) {
     if(!count) return {};
     if(count>262144 || !material || !occupancyReady || !masks || !bits || !rows || !step)
       throw std::invalid_argument("Invalid OpenCL collision batch");
@@ -228,6 +252,8 @@ struct GpuBitmap::Impl {
     arg(0,occupancy); arg(1,material); arg(2,masks); arg(3,bits); arg(4,candidates); arg(5,output);
     arg(6,width); arg(7,height); arg(8,stride); arg(9,rotations); arg(10,count); arg(11,mode);
     const cl_ulong start=first; arg(12,start); arg(13,rows); arg(14,step); arg(15,ww); arg(16,wh);
+    if(!maskCount) maskCount=rotations;
+    arg(17,firstMask); arg(18,maskCount); arg(19,originX); arg(20,originY);
     const size_t global=count;
     check(api.clEnqueueNDRangeKernel(queue,kernel,1,nullptr,&global,nullptr,0,nullptr,nullptr),"dispatch collision kernel");
     std::vector<uint8_t> flags(count);
@@ -249,10 +275,11 @@ const GpuDeviceInfo& GpuBitmap::device() const { return impl_->info; }
 void GpuBitmap::setSheet(uint32_t w,uint32_t h,std::span<const uint64_t> material) {
   const uint64_t stride=(uint64_t(w)+63)/64;
   if(!w || !h || material.size()!=stride*h || material.size()>UINT32_MAX) throw std::invalid_argument("Invalid GPU sheet dimensions");
+  impl_->clearSavedOccupancies();impl_->occupancySlot=0;
   impl_->width=w; impl_->height=h; impl_->stride=uint32_t(stride); impl_->sheetBytes=material.size_bytes();
   impl_->occupancyReady=false;
   impl_->replace(impl_->material,material.size_bytes(),CL_MEM_READ_ONLY,material.data());
-  impl_->replace(impl_->occupancy,material.size_bytes(),CL_MEM_READ_ONLY);
+  impl_->replace(impl_->occupancy,material.size_bytes(),CL_MEM_READ_WRITE);
 }
 // Upload material already occupied by accepted parts.
 void GpuBitmap::setOccupancy(std::span<const uint64_t> occupancy) {
@@ -260,14 +287,36 @@ void GpuBitmap::setOccupancy(std::span<const uint64_t> occupancy) {
   check(impl_->api.clEnqueueWriteBuffer(impl_->queue,impl_->occupancy,CL_TRUE,0,occupancy.size_bytes(),occupancy.data(),0,nullptr,nullptr),"upload occupancy");
   impl_->occupancyReady=true;
 }
+// Retain occupancies across worker switches, bounded to 128 MiB (or 1/16 VRAM).
+// The active bitmap is always available even when a sheet exceeds that budget.
+bool GpuBitmap::selectOccupancySlot(uint64_t slot) {
+  auto& p=*impl_;
+  if(!p.occupancy || !p.sheetBytes) throw std::invalid_argument("Set GPU sheet before selecting occupancy");
+  if(slot==p.occupancySlot) return p.occupancyReady;
+  cl_mem next=nullptr;bool ready=false;
+  const auto found=p.savedOccupancies.find(slot);
+  if(found!=p.savedOccupancies.end()) {
+    next=found->second.memory;ready=found->second.ready;p.savedOccupancies.erase(found);
+  }
+  const size_t limit=size_t(std::max<uint64_t>(1,std::min<uint64_t>(128ULL*1024*1024,p.info.memoryBytes/16)/p.sheetBytes));
+  while(p.savedOccupancies.size()+1>=limit && !p.savedOccupancies.empty()) {
+    auto victim=p.savedOccupancies.begin();p.api.clReleaseMemObject(victim->second.memory);p.savedOccupancies.erase(victim);
+  }
+  if(limit>1) p.savedOccupancies.emplace(p.occupancySlot,Impl::SavedOccupancy{p.occupancy,p.occupancyReady});
+  else p.api.clReleaseMemObject(p.occupancy);
+  p.occupancy=next;p.occupancyReady=ready;p.occupancySlot=slot;
+  if(!p.occupancy) p.replace(p.occupancy,p.sheetBytes,CL_MEM_READ_WRITE);
+  return ready;
+}
 // Upload packed rotation masks and their dimensions.
 void GpuBitmap::setMasks(std::span<const GpuMaskInfo> masks,std::span<const uint64_t> words) {
-  if(masks.empty() || masks.size()>3600 || words.size()>UINT32_MAX) throw std::invalid_argument("Invalid GPU masks");
+  if(masks.empty() || masks.size()>UINT32_MAX || words.size()>UINT32_MAX) throw std::invalid_argument("Invalid GPU masks");
   for(const auto& m:masks) if(!m.width || !m.height || m.wordsPerRow!=(uint64_t(m.width)+63)/64 ||
       uint64_t(m.offset)+uint64_t(m.height)*m.wordsPerRow>words.size()) throw std::invalid_argument("Invalid GPU mask bounds");
   impl_->replace(impl_->masks,masks.size_bytes(),CL_MEM_READ_ONLY,masks.data());
   impl_->replace(impl_->bits,words.size_bytes(),CL_MEM_READ_ONLY,words.data());
   impl_->rotations=cl_uint(masks.size());
+  impl_->maskInfo.assign(masks.begin(),masks.end());
 }
 // Evaluate a batch of explicit candidate placements on the GPU.
 std::vector<uint8_t> GpuBitmap::filter(std::span<const GpuCandidate> candidates) {
@@ -275,10 +324,34 @@ std::vector<uint8_t> GpuBitmap::filter(std::span<const GpuCandidate> candidates)
   return impl_->run(uint32_t(candidates.size()),0,0,1,1,impl_->width,impl_->height,candidates);
 }
 // Evaluate a contiguous range of an implicit candidate grid.
-std::vector<uint8_t> GpuBitmap::filterGrid(uint64_t first,uint32_t count,uint32_t rows,uint32_t step,uint32_t ww,uint32_t wh) {
+std::vector<uint8_t> GpuBitmap::filterGrid(uint64_t first,uint32_t count,uint32_t rows,uint32_t step,uint32_t ww,uint32_t wh,uint32_t firstMask,uint32_t maskCount,uint32_t originX,uint32_t originY) {
+  if(!maskCount) maskCount=impl_->rotations;
+  if(firstMask>impl_->rotations || maskCount>impl_->rotations-firstMask) throw std::invalid_argument("Invalid GPU mask range");
   if(!rows || !step || !impl_->rotations || uint64_t(rows)*step>uint64_t(INT32_MAX) ||
-      first>UINT64_MAX-count || (first+count)/impl_->rotations/rows>uint64_t(INT32_MAX)/step)
+      first>UINT64_MAX-count || (first+count)/maskCount/rows>uint64_t(INT32_MAX)/step)
     throw std::invalid_argument("Invalid GPU grid range");
-  return impl_->run(count,1,first,rows,step,ww,wh);
+  if(originX>uint32_t(INT32_MAX)||originY>uint32_t(INT32_MAX) ||
+      (first+count)/maskCount/rows*step+originX>uint64_t(INT32_MAX) || uint64_t(rows)*step+originY>uint64_t(INT32_MAX))
+    throw std::invalid_argument("Invalid GPU grid origin");
+  return impl_->run(count,1,first,rows,step,ww,wh,{},firstMask,maskCount,originX,originY);
+}
+}
+
+namespace clinesting {
+void GpuBitmap::toggleMask(uint32_t rotation,int32_t x,int32_t y) {
+  auto& p=*impl_;
+  if(!p.occupancyReady || rotation>=p.maskInfo.size() || x<0 || y<0)
+    throw std::invalid_argument("Invalid GPU occupancy update");
+  const auto& mask=p.maskInfo[rotation];
+  if(uint64_t(x)+mask.width>p.width || uint64_t(y)+mask.height>p.height)
+    throw std::invalid_argument("GPU occupancy update outside stock");
+  auto arg=[&](cl_uint index,const auto& value) {
+    check(p.api.clSetKernelArg(p.toggleKernel,index,sizeof(value),&value),"toggle argument");
+  };
+  arg(0,p.occupancy);arg(1,p.masks);arg(2,p.bits);arg(3,p.stride);
+  arg(4,rotation);arg(5,x);arg(6,y);
+  const size_t count=size_t(mask.height)*((mask.width+(uint32_t(x)&63)+63)/64);
+  check(p.api.clEnqueueNDRangeKernel(p.queue,p.toggleKernel,1,nullptr,&count,nullptr,0,nullptr,nullptr),"toggle occupancy");
+  // The in-order queue ensures subsequent filtering sees this update. No readback.
 }
 }
