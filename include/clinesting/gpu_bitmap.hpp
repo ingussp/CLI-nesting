@@ -40,6 +40,11 @@ class GpuBitmap {
   void setSheet(uint32_t width, uint32_t height, std::span<const uint64_t> material);
   // Upload material already occupied by accepted parts.
   void setOccupancy(std::span<const uint64_t> occupancy);
+  // Select a bounded resident worker bitmap; false means it needs an upload.
+  // Changing the sheet invalidates all slots. Calls must be externally serialized.
+  bool selectOccupancySlot(uint64_t slot);
+  // Reversibly update a resident occupancy bitmap; caller guarantees no overlap.
+  void toggleMask(uint32_t rotation,int32_t x,int32_t y);
   // Upload packed rotation masks and their dimensions.
   void setMasks(std::span<const GpuMaskInfo> masks, std::span<const uint64_t> words);
   // Flags preserve input order, including invalid origins. A 1 means raster
@@ -47,7 +52,9 @@ class GpuBitmap {
   std::vector<uint8_t> filter(std::span<const GpuCandidate> candidates);
   // Evaluate a contiguous range of an implicit candidate grid.
   std::vector<uint8_t> filterGrid(uint64_t first, uint32_t count, uint32_t rows,
-                                uint32_t step, uint32_t windowWidth, uint32_t windowHeight);
+                                uint32_t step, uint32_t windowWidth, uint32_t windowHeight,
+                                uint32_t firstMask=0, uint32_t maskCount=0,
+                                uint32_t originX=0, uint32_t originY=0);
  private:
   // Store OpenCL context, kernels and buffers behind the public interface.
   struct Impl;

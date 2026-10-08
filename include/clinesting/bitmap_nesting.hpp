@@ -16,6 +16,12 @@ struct BitmapNestingStats {
   std::string gpuFallbackReason;
   size_t gpuCandidates{0};
   size_t gpuBatches{0};
+  size_t recursiveNodes{0},recursiveBacktracks{0},recursiveMaxDepth{0};
+  size_t recursiveDuplicateSkips{0};
+  bool recursiveExhausted{false};
+  bool continuousPortfolio{false};
+  size_t contactTrials{0},groupTrials{0},localRepairTrials{0},maxPatternGroupSize{0};
+  size_t maxInterlockingCapacity{0}; // Validated contour-fitting lattice capacity.
   size_t vectorMoves{0},vectorChecks{0},searchIterations{0};
   double vectorRefinementMs{0};
   bool vectorRefinementCompleted{false};
@@ -96,6 +102,13 @@ PlacementResult placePartsBitmap(const std::vector<Polygon>& sheets,
                                  BitmapNestingStats* stats = nullptr,
                                  const BitmapPartProgressCallback& onPartProgress = {},
                                  const BitmapLayoutCallback& onLayout = {});
+
+// CPU compaction/neighbourhood repair used by continuous companion trials.
+// Returns a candidate that may be worse; caller must retain the better layout.
+// Input placements must refer to unique part/sheet IDs from this job.
+PlacementResult refillBitmapLayout(const std::vector<Polygon>& sheets,
+    const std::vector<Polygon>& parts,const PlacementResult& incumbent,
+    const Config& config,BitmapNestingStats* stats=nullptr);
 
 // Report whether this build and CPU can use AVX2 bitmap operations.
 bool bitmapAvx2Supported();

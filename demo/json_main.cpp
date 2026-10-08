@@ -6,6 +6,7 @@
 #include <atomic>
 #include <csignal>
 #include <iostream>
+#include <fstream>
 #include <optional>
 #include <cctype>
 #include <chrono>
@@ -183,6 +184,7 @@ int main(int argc,char** argv) {
     paths.push_back(temporaryOutput);
     if(dxf) paths.push_back(*dxf);
     if(svg) paths.push_back(*svg);
+    if(request.config.mode==clinesting::SearchMode::Continuous) paths.push_back(base/"recursive-progress.log");
     validatePaths(paths);
     Signals signals;
     if(request.config.mode==clinesting::SearchMode::Continuous) {
@@ -192,9 +194,16 @@ int main(int argc,char** argv) {
       clinesting::cli::ResultDirectory results(base,absoluteInput);
       std::cout<<"Continuous search: cleared "<<results.path().string()<<"\n"
                <<"Press Ctrl+C or close this console to stop. Improving layouts are saved immediately.\n"
-               <<"Restart budget: "<<request.config.continuousRoundSeconds<<" seconds; no overall time limit.\n"<<std::flush;
+               <<"Initial layout budget: "<<request.config.continuousRoundSeconds<<" seconds; continuous search runs until stopped.\n"<<std::flush;
+      std::ofstream progressLog(base/"recursive-progress.log",std::ios::app);
+      if(!progressLog) throw std::runtime_error("Cannot open recursive-progress.log");
+      progressLog<<"New job: "<<request.jobId<<"\n"<<std::flush;
+      request.config.searchProgress=[&](const std::string& message) {
+        progressLog<<message<<"\n"<<std::flush;
+        std::cout<<message<<"\n"<<std::flush;
+      };
       size_t saved=0;
-      clinesting::runContinuousNesting(request,stopped,[&](const auto& candidate,const auto& result,size_t sequence) {
+      const auto finalStats=clinesting::runContinuousNesting(request,stopped,[&](const auto& candidate,const auto& result,size_t sequence) {
         results.save(sequence,candidate,result,dxf.has_value(),svg.has_value());
         publishResult(output,candidate,result);
         saved=sequence;
@@ -205,7 +214,23 @@ int main(int argc,char** argv) {
           <<" mm2; restart: "<<candidate.config.searchIteration<<"\n"<<std::flush;
         if(sequence==1 && request.output.openPreview) preview(results.path()/"result1.svg");
       });
-      std::cout<<"Stopped by user. Saved "<<saved<<" improving layouts in "<<results.path().string()<<"\n";
+      request.config.searchProgress("Recursive finished: nodes="+std::to_string(finalStats.bitmapStats.recursiveNodes)+
+        " backtracks="+std::to_string(finalStats.bitmapStats.recursiveBacktracks)+
+        " duplicateSkips="+std::to_string(finalStats.bitmapStats.recursiveDuplicateSkips)+
+        " exhausted="+std::to_string(finalStats.bitmapStats.recursiveExhausted)+
+        " cancelled="+std::to_string(finalStats.bitmapStats.cancelled));
+      if(finalStats.bitmapStats.continuousPortfolio) request.config.searchProgress(
+        "Contact finished: trials="+std::to_string(finalStats.bitmapStats.contactTrials)+
+        " groupTrials="+std::to_string(finalStats.bitmapStats.groupTrials)+
+        " repairTrials="+std::to_string(finalStats.bitmapStats.localRepairTrials)+
+        " maxGroupSize="+std::to_string(finalStats.bitmapStats.maxPatternGroupSize));
+      std::cout<<"Recursive nodes: "<<finalStats.bitmapStats.recursiveNodes
+               <<"; backtracks: "<<finalStats.bitmapStats.recursiveBacktracks
+               <<"; max depth: "<<finalStats.bitmapStats.recursiveMaxDepth
+               <<"; GPU candidates: "<<finalStats.bitmapStats.gpuCandidates
+               <<"; GPU batches: "<<finalStats.bitmapStats.gpuBatches
+               <<"; grid exhausted: "<<finalStats.bitmapStats.recursiveExhausted<<"\n";
+      std::cout<<"Search finished. Saved "<<saved<<" improving layouts in "<<results.path().string()<<"\n";
       return 0;
     }
     clinesting::OrchestratorRunStats result;
@@ -236,7 +261,7 @@ int main(int argc,char** argv) {
     if(dxf) std::cout<<"DXF: "<<fs::absolute(*dxf).string()<<"\n";
     if(svg) std::cout<<"SVG: "<<fs::absolute(*svg).string()<<"\n";
     if(result.bitmapStats.timeLimitReached) std::cout<<"Time limit reached. Saved the best validated layout found; inspect unplacedCount.\n";
-    if(result.bitmapStats.cancelled) std::cout<<"Stopped by user. Saved the available validated layout.\n";
+    if(result.bitmapStats.cancelled) std::cout<<"Search finished. Saved the available validated layout.\n";
     if(request.output.openPreview) preview(fs::absolute(*svg));
     return 0;
   } catch(const std::exception& e) { std::cerr<<"Error: "<<e.what()<<"\n"; return 1; }

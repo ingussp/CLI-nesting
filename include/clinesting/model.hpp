@@ -100,6 +100,9 @@ struct Config {
   int bitmapTrials{2};
   bool bitmapCacheRejects{true};
   int bitmapRejectCacheMiB{256}; // Shared by concurrent strategies; sparse pages grow on demand.
+  bool bitmapContactColumnFirst{false}; // Internal alternative contact ordering.
+  bool bitmapNfpContacts{false}; // Internal continuous contact portfolio.
+  bool bitmapGroupTrial{false}; // Internal repeated groups of up to eight copies.
   bool bitmapPatternTrial{false}; // internal strategy selector
   bool gpuEnabled{false};
   int gpuDevice{-1}; // -1 chooses a discrete GPU when available
@@ -110,6 +113,7 @@ struct Config {
   SearchMode mode{SearchMode::First};
   double continuousRoundSeconds{30.0};
   uint64_t searchIteration{0}; // Internal restart variation; zero keeps the original strategies.
+  std::function<void(const std::string&)> searchProgress; // Serialized periodic diagnostics.
   std::function<bool()> stopRequested; // Internal, thread-safe cooperative cancellation hook.
 };
 

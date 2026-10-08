@@ -77,6 +77,11 @@ class ProtocolTests(unittest.TestCase):
         latest = json.loads((self.root / 'result.json').read_text(encoding='utf-8'))
         self.assertEqual(latest, json.loads(snapshots[-1].read_text(encoding='utf-8')))
         self.assertFalse(list(self.root.rglob('*.tmp')))
+        self.assertEqual(latest['stopReason'], 'searching')
+        log = (self.root / 'recursive-progress.log').read_text()
+        self.assertIn('New job:', log)
+        self.assertIn('Recursive finished:', log)
+        self.assertIn('cancelled=1', log)
 
     def test_cancel_path_cannot_overwrite_input(self):
         path, data = self.job('first')

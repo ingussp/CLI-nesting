@@ -1,4 +1,5 @@
 #include "clinesting/bitmap_nesting.hpp"
+#include "clinesting/continuous_nesting.hpp"
 
 #include "clinesting/geometry.hpp"
 #include "clinesting/nfp.hpp"
@@ -718,15 +719,31 @@ struct PairPattern {
   std::vector<Candidate> pending;
   std::vector<uint8_t> flags;
   size_t pendingCursor{0};
+  std::vector<Candidate> group;
+  size_t searchedMembers{0};
+  int rowShift{0}, oddColumns{-1};
+  bool interlocking{false};
   // Return the number of positions available in a repeated pattern.
-  uint64_t capacity() const { return uint64_t(columns) * rows * members; }
+  uint64_t capacity() const {
+    const auto cells=oddColumns<0 ? uint64_t(columns)*rows :
+        uint64_t(columns)*((rows+1)/2)+uint64_t(oddColumns)*(rows/2);
+    return cells*members;
+  }
   // Advance to the next available cached origin or pattern position.
   Candidate next() {
     const auto index = cursor++;
     const auto cell = index / members;
-    auto c = members == 2 && index % 2 ? b : a;
-    c.x += int(cell % columns) * width;
-    c.y += int(cell / columns) * height;
+    auto c = !group.empty() ? group[size_t(index%members)] : (members == 2 && index % 2 ? b : a);
+    if(oddColumns<0) {
+      c.x += int(cell % columns) * width;
+      c.y += int(cell / columns) * height;
+    } else {
+      const auto pair=cell/uint64_t(columns+oddColumns);
+      const auto offset=cell%uint64_t(columns+oddColumns);
+      const bool odd=offset>=uint64_t(columns);
+      c.x+=int(odd?offset-columns:offset)*width+(odd?rowShift:0);
+      c.y+=int(2*pair+odd)*height;
+    }
     return c;
   }
 };
@@ -745,10 +762,14 @@ std::vector<Point> clearanceContacts(const Polygon& nfp,const Config& config) {
   return points;
 }
 
-// Pattern cells have disjoint bounds, including their required clearance.
+#include "interlocking_pattern.hpp"
+#include "group_pattern_search.hpp"
+
+// Begin with disjoint cells; continuous group trials also fit their contours.
 PairPattern makePairPattern(const std::vector<const RasterMask*>& masks, int sheetW, int sheetH,
                             const Config& config, NfpCache& cache, RasterPixels& pixels,const SearchDeadline& deadline) {
   PairPattern best;
+  std::unordered_map<size_t,PairPattern> groupSeeds;
   auto consider = [&](Candidate a, Candidate b, int members) {
     deadline.check();
     const auto& am = *masks[a.rotation];
@@ -763,9 +784,11 @@ PairPattern makePairPattern(const std::vector<const RasterMask*>& masks, int she
     const int edge=int(std::min(maxGap,std::ceil(config.sheetSpacing/config.bitmapResolutionMm)));
     PairPattern p{a,b,w,h,std::max(0,sheetW-2*edge+gap)/w,std::max(0,sheetH-2*edge+gap)/h,members};
     p.a.x+=edge;p.a.y+=edge;p.b.x+=edge;p.b.y+=edge;
-    if (p.capacity() < best.capacity()) return;
-    if (p.capacity() == best.capacity() && best.width &&
-        int64_t(w)*h*best.members >= int64_t(best.width)*best.height*members) return;
+    const size_t seedKey=(a.rotation*masks.size()+b.rotation)*2+size_t(members-1);
+    if(config.bitmapGroupTrial) {
+      const auto it=groupSeeds.find(seedKey);
+      if(it!=groupSeeds.end() && !betterPattern(p,it->second)) return;
+    } else if(!betterPattern(p,best)) return;
     if (members == 2) {
       const auto pa = shiftPolygon(am.rotatedPart,
           {a.x*config.bitmapResolutionMm-am.minX,a.y*config.bitmapResolutionMm-am.minY,true});
@@ -780,7 +803,8 @@ PairPattern makePairPattern(const std::vector<const RasterMask*>& masks, int she
       pixels.ensure(bm);
       if (!maskFits(occupied,material,bm,b.x,b.y,false)) return;
     }
-    best=p;
+    if(config.bitmapGroupTrial) groupSeeds[seedKey]=p;
+    if(betterPattern(p,best)) best=p;
   };
   for (size_t a=0; a<masks.size(); ++a) consider({0,0,a},{0,0,a},1);
   // Bound preprocessing for inputs allowing many angles. The compact strategy
@@ -799,6 +823,29 @@ PairPattern makePairPattern(const std::vector<const RasterMask*>& masks, int she
       const int y=int(std::floor((p.y-bm.rotatedPart.points.front().y-am.minY+bm.minY)/config.bitmapResolutionMm));
       for(int dx:{0,1}) for(int dy:{0,1}) consider({0,0,a},{x+dx,y+dy,b},2);
     }
+  }
+  if(config.bitmapGroupTrial) {
+    // Leave most of a bounded helper trial for placing the pattern and filling
+    // its remaining gaps. Keep the last fully validated pattern on expiry.
+    SearchDeadline preparation(config.timeLimitSeconds>0 ? std::min(2.0,config.timeLimitSeconds*0.4) : 0,
+                               [&]{return deadline.expired();});
+    auto seed=best;
+    try {
+      improveInterlockingPattern(best,masks,sheetW,sheetH,config,cache,preparation);
+      // Rectangular capacity alone can discard the best interlocking motif.
+      // Revisit alternative orientations across successive continuous trials.
+      std::vector<std::pair<size_t,PairPattern>> alternatives(groupSeeds.begin(),groupSeeds.end());
+      std::sort(alternatives.begin(),alternatives.end(),[](const auto& a,const auto& b){return a.first<b.first;});
+      for(size_t i=0;i<std::min<size_t>(3,alternatives.size());++i) {
+        auto candidate=alternatives[(config.searchIteration*3+i)%alternatives.size()].second;
+        const auto original=candidate;
+        SearchDeadline candidateBudget(0.25,[&]{return preparation.expired();});
+        try {improveInterlockingPattern(candidate,masks,sheetW,sheetH,config,cache,candidateBudget);}
+        catch(const SearchTimeExpired&) {preparation.check();}
+        if(betterPattern(candidate,best)) {best=std::move(candidate);seed=original;}
+      }
+      improveGroupPattern(best,seed,masks,sheetW,sheetH,config,cache,preparation);
+    } catch(const SearchTimeExpired&) { deadline.check(); }
   }
   return best;
 }
@@ -1261,6 +1308,8 @@ PlacementResult placePartsBitmapOnSingleSheet(const Polygon& sheet,
       auto [patternIt,inserted] = patterns.try_emplace(searchIdentity);
       if (inserted) patternIt->second=makePairPattern(rotationMasks,material.widthPx,material.heightPx,config,contactNfpCache,pixels,deadline);
       auto& pattern=patternIt->second;
+      localStats.maxPatternGroupSize=std::max(localStats.maxPatternGroupSize,pattern.searchedMembers);
+      if(pattern.interlocking) localStats.maxInterlockingCapacity=std::max(localStats.maxInterlockingCapacity,size_t(pattern.capacity()));
       while(!fromPattern) {
         if(pattern.pendingCursor==pattern.pending.size()) {
           pattern.pending.clear(); pattern.pendingCursor=0;
@@ -1365,11 +1414,11 @@ PlacementResult placePartsBitmapOnSingleSheet(const Polygon& sheet,
           propose(right - m->widthPx, top, r); propose(right, top - m->heightPx, r);
           propose(q.x - m->widthPx, q.y, r); propose(q.x, q.y - m->heightPx, r);
           // A bounded recent frontier adds interlocking proposals for concave parts.
-          if ((!config.bitmapBottomLeft || !seeds.empty()) && i + 24 >= rasterPlacements.size() && r % contactStride == 0) {
-            if (q.identity == identity) {
+          if ((config.bitmapNfpContacts || !config.bitmapBottomLeft || !seeds.empty()) && i + 24 >= rasterPlacements.size() && r % contactStride == 0) {
+            if (q.identity == identity || config.bitmapNfpContacts) {
               // Compute tight pair contacts once per repeated shape/rotation pair.
               // Unlike full NFP placement, no union of all occupied NFPs is built.
-              NfpKey key{identity, identity, q.mask->rotationDeg, m->rotationDeg, false};
+              NfpKey key{q.identity, identity, q.mask->rotationDeg, m->rotationDeg, false};
               auto [it, inserted] = pairContacts.try_emplace(key);
               if (inserted) {
                 auto nfp = getOuterNfp(q.mask->rotatedPart, m->rotatedPart, false, config, contactNfpCache);
@@ -1434,7 +1483,9 @@ PlacementResult placePartsBitmapOnSingleSheet(const Polygon& sheet,
     if (!fromPattern && !exhausted.contains(searchIdentity)) {
       if(config.bitmapBottomLeft && seeds.empty()) {
         PhaseTimer timer{localStats.phases.searchMs};
-        std::sort(candidates.begin(),candidates.end(),[](const Candidate& a,const Candidate& b) {
+        std::sort(candidates.begin(),candidates.end(),[&](const Candidate& a,const Candidate& b) {
+          if(config.bitmapNfpContacts && config.bitmapContactColumnFirst)
+            return std::tie(a.x,a.y,a.rotation)<std::tie(b.x,b.y,b.rotation);
           return std::tie(a.y,a.x,a.rotation)<std::tie(b.y,b.x,b.rotation);
         });
         evaluateOrdered(candidates,true);
@@ -1695,7 +1746,110 @@ PlacementResult placePartsBitmapOnSingleSheet(const Polygon& sheet,
   return out;
 }
 
+#include "recursive_bitmap_search.hpp"
+
 }  // namespace
+
+// CPU companion search: compact a copy of the incumbent, then try refilling.
+// It never mutates a live recursive tree or its GPU occupancy.
+PlacementResult refillBitmapLayout(const std::vector<Polygon>& sheets,
+    const std::vector<Polygon>& parts,const PlacementResult& incumbent,
+    const Config& config,BitmapNestingStats* stats) {
+  const auto started=std::chrono::steady_clock::now();
+  const SearchDeadline deadline(config.timeLimitSeconds,config.stopRequested);
+  auto result=incumbent;BitmapNestingStats counts;
+  auto cfg=config;cfg.gpuEnabled=false;cfg.threads=1;cfg.bitmapPatternTrial=false;
+  cfg.bitmapBottomLeft=true;cfg.mode=SearchMode::First;
+  // On later passes release a small spatial neighbourhood, including early
+  // placements that depth-first backtracking may not revisit for hours.
+  if(cfg.searchIteration>0 && !result.placements.empty()) {
+    auto& layout=result.placements[(cfg.searchIteration-1)%result.placements.size()];
+    if(!layout.sheetplacements.empty()) {
+      const auto anchor=layout.sheetplacements[(cfg.searchIteration-1)%layout.sheetplacements.size()];
+      std::vector<size_t> order(layout.sheetplacements.size());std::iota(order.begin(),order.end(),0);
+      std::stable_sort(order.begin(),order.end(),[&](size_t a,size_t b) {
+        const auto& x=layout.sheetplacements[a];const auto& y=layout.sheetplacements[b];
+        return std::hypot(x.x-anchor.x,x.y-anchor.y)<std::hypot(y.x-anchor.x,y.y-anchor.y);
+      });
+      const size_t count=std::min<size_t>(3+(cfg.searchIteration/7)%6,order.size());
+      std::unordered_set<size_t> removed(order.begin(),order.begin()+count);
+      std::vector<Placement> kept;
+      for(size_t i=0;i<layout.sheetplacements.size();++i) {
+        const auto& placement=layout.sheetplacements[i];
+        if(!removed.contains(i)) {kept.push_back(placement);continue;}
+        const auto original=std::find_if(parts.begin(),parts.end(),[&](const auto& p){return p.id==placement.id;});
+        if(original==parts.end()) throw std::invalid_argument("Unknown removed part in refill incumbent");
+        // Put released parts first so the repair restores its neighbourhood.
+        result.unplaced.insert(result.unplaced.begin(),*original);
+      }
+      layout.sheetplacements=std::move(kept);
+    }
+  }
+  refineVectors(sheets,parts,result,cfg,deadline,counts);
+  ParallelLoop parallel(1);
+  detail::RejectionCacheBudget rejectionBudget(16*1024*1024);
+  std::unique_ptr<GpuBitmap> gpu;
+  // Cycle a small angle shortlist; repeated passes cover the input angle policy.
+  auto remaining=result.unplaced;
+  for(auto& part:remaining) {
+    const auto allowed=part.allowedAngles;
+    if(allowed.size()>12) {
+      part.allowedAngles.clear();
+      for(size_t i=0;i<12;++i)
+        part.allowedAngles.push_back(allowed[(i*allowed.size()/12+cfg.searchIteration)%allowed.size()]);
+      // Include the released copy's previous orientation, otherwise narrow
+      // pockets could never be restored by the coarse rotation shortlist.
+      for(const auto& layout:incumbent.placements) for(const auto& placement:layout.sheetplacements)
+        if(placement.id==part.id && std::find(part.allowedAngles.begin(),part.allowedAngles.end(),placement.rotation)==part.allowedAngles.end())
+          part.allowedAngles.insert(part.allowedAngles.begin(),placement.rotation);
+    }
+  }
+  for(const auto& sheet:sheets) {
+    if(remaining.empty() || deadline.expired()) break;
+    auto layout=std::find_if(result.placements.begin(),result.placements.end(),[&](const auto& p){return p.sheetid==sheet.id;});
+    // Search existing sheets only; a companion must not consume extra stock.
+    if(layout==result.placements.end()) continue;
+    std::vector<std::pair<Placement,Polygon>> seeds;
+    for(const auto& placement:layout->sheetplacements) {
+      const auto original=std::find_if(parts.begin(),parts.end(),[&](const auto& p){return p.id==placement.id;});
+      if(original==parts.end()) throw std::invalid_argument("Unknown part in refill incumbent");
+      seeds.emplace_back(placement,shiftPolygon(rotatePolygon(*original,placement.rotation),{placement.x,placement.y,true}));
+    }
+    BitmapNestingStats fillStats;
+    auto filled=placePartsBitmapOnSingleSheet(sheet,remaining,cfg,parallel,rejectionBudget,gpu,deadline,false,&fillStats,{},seeds);
+    counts.vectorChecks+=fillStats.vectorChecks;counts.candidatesExamined+=fillStats.candidatesExamined;
+    if(filled.placements.empty() || filled.placements.front().sheetplacements.size()<=seeds.size()) continue;
+    counts.refillPlacements+=filled.placements.front().sheetplacements.size()-seeds.size();++counts.refillPasses;
+    layout->sheetplacements=std::move(filled.placements.front().sheetplacements);
+    remaining=std::move(filled.unplaced);
+  }
+  // Restore original complete angle policies for every still-unplaced copy.
+  result.unplaced.clear();result.area=0;result.totalarea=0;counts.occupiedBoundsArea=0;
+  std::unordered_set<int> placed;
+  for(const auto& layout:result.placements) {
+    const auto sheet=std::find_if(sheets.begin(),sheets.end(),[&](const auto& p){return p.id==layout.sheetid;});
+    const auto sb=getPolygonBounds(sheet->points);double right=0,top=0,left=sb.width,bottom=sb.height;
+    if(!layout.sheetplacements.empty()) result.totalarea+=polygonMaterialArea(*sheet);
+    for(const auto& placement:layout.sheetplacements) {
+      placed.insert(placement.id.value());
+      const auto source=std::find_if(parts.begin(),parts.end(),[&](const auto& p){return p.id==placement.id;});
+      const auto geometry=shiftPolygon(rotatePolygon(*source,placement.rotation),{placement.x,placement.y,true});
+      const auto b=getPolygonBounds(geometry.points);right=std::max(right,b.x+b.width-sb.x);top=std::max(top,b.y+b.height-sb.y);
+      left=std::min(left,b.x-sb.x);bottom=std::min(bottom,b.y-sb.y);
+    }
+    if(!layout.sheetplacements.empty()) counts.occupiedBoundsArea+=(right-left)*(top-bottom);
+  }
+  for(const auto& part:parts) {
+    if(placed.contains(part.id.value())) result.area+=polygonMaterialArea(part);
+    else result.unplaced.push_back(part);
+  }
+  result.fitness=double(result.unplaced.size());result.utilisation=result.totalarea?100*result.area/result.totalarea:0;
+  counts.placedParts=counts.acceptedPlacements=placed.size();counts.unplacedParts=result.unplaced.size();
+  counts.cancelled=deadline.cancelled();counts.timeLimitReached=deadline.timedOut();
+  counts.totalBitmapMs=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-started).count();
+  if(stats) *stats=counts;
+  return result;
+}
 
 // Report whether this build and CPU can use AVX2 bitmap operations.
 bool bitmapAvx2Supported() {
@@ -1733,6 +1887,7 @@ PlacementResult placePartsBitmap(const std::vector<Polygon>& sheets,
       if(!std::isfinite(angle) || angle<0 || angle>=360)
         throw std::invalid_argument("Library allowedAngles must be normalized to [0,360)");
   }
+  if(config.mode==SearchMode::Continuous) return parallelRecursiveSearch(sheets,parts,config,stats,onLayout);
   const SearchDeadline deadline(config.timeLimitSeconds,config.stopRequested);
   if (sheets.empty()) {
     return {};
@@ -1875,6 +2030,8 @@ PlacementResult placePartsBitmap(const std::vector<Polygon>& sheets,
           t.failedSearchSkips+=s.failedSearchSkips;
           t.rejectedPositionSkips+=s.rejectedPositionSkips;
           t.patternPlacements+=s.patternPlacements;
+          t.maxPatternGroupSize=std::max(t.maxPatternGroupSize,s.maxPatternGroupSize);
+          t.maxInterlockingCapacity=std::max(t.maxInterlockingCapacity,s.maxInterlockingCapacity);
           t.holePlacements+=s.holePlacements;
           t.refillPlacements+=s.refillPlacements;t.refillPasses+=s.refillPasses;
           t.vectorMoves+=s.vectorMoves;t.vectorChecks+=s.vectorChecks;

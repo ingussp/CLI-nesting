@@ -324,7 +324,11 @@ void writeNestingJson(const std::filesystem::path& path,const BackgroundRequest&
     {"patternPlacements",run.bitmapStats.patternPlacements},{"rejectedPositionSkips",run.bitmapStats.rejectedPositionSkips},
     {"holePlacements",run.bitmapStats.holePlacements},{"failedSearchSkips",run.bitmapStats.failedSearchSkips},
     {"sheets",Json::array()},{"unplaced",Json::array()}};
-  out["bitmapSearch"]=input.config.mode==SearchMode::First ? "bottom-left" : "portfolio";
+  out["recursiveSearch"]={{"nodes",run.bitmapStats.recursiveNodes},{"backtracks",run.bitmapStats.recursiveBacktracks},
+    {"maxDepth",run.bitmapStats.recursiveMaxDepth},{"duplicateSkips",run.bitmapStats.recursiveDuplicateSkips},{"exhausted",run.bitmapStats.recursiveExhausted}};
+  out["bitmapSearch"]=run.bitmapStats.continuousPortfolio ? "hybrid-contact" : input.config.mode==SearchMode::First ? "bottom-left" : input.config.mode==SearchMode::Continuous ? "recursive-grid" : "portfolio";
+  out["contactSearch"]={{"trials",run.bitmapStats.contactTrials},{"groupTrials",run.bitmapStats.groupTrials},{"repairTrials",run.bitmapStats.localRepairTrials},{"maxGroupSize",run.bitmapStats.maxPatternGroupSize}};
+  out["contactSearch"]["maxInterlockingCapacity"]=run.bitmapStats.maxInterlockingCapacity;
   out["sheetRefill"]={{"placements",run.bitmapStats.refillPlacements},{"passes",run.bitmapStats.refillPasses}};
   out["vectorRefinement"]={{"moves",run.bitmapStats.vectorMoves},{"checks",run.bitmapStats.vectorChecks},{"milliseconds",run.bitmapStats.vectorRefinementMs},{"toleranceMm",0.001},{"completed",run.bitmapStats.vectorRefinementCompleted}};
   out["searchIterations"]=run.bitmapStats.searchIterations;
@@ -337,7 +341,8 @@ void writeNestingJson(const std::filesystem::path& path,const BackgroundRequest&
   if(!input.metadataJson.empty()) out["_ip_nesting"]=Json::parse(input.metadataJson);
   out["timeLimitSeconds"]=input.config.timeLimitSeconds;
   out["timeLimitReached"]=run.bitmapStats.timeLimitReached;
-  out["stopReason"]=run.bitmapStats.cancelled ? "user_stop" : run.bitmapStats.timeLimitReached ? "time_limit" : "completed";
+  out["stopReason"]=run.bitmapStats.cancelled ? "user_stop" : run.bitmapStats.timeLimitReached ? "time_limit" :
+    input.config.mode==SearchMode::Continuous && !run.bitmapStats.recursiveExhausted ? "searching" : "completed";
   out["continuous"]=input.config.continuous;
   out["mode"]=input.config.mode==SearchMode::First ? "first" : input.config.mode==SearchMode::Timed ? "timed" : "continuous";
   out["continuousRoundSeconds"]=input.config.continuousRoundSeconds;

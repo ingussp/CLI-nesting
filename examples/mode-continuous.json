@@ -9,7 +9,7 @@
       "enabled": true,
       "device": -1,
       "fallbackToCpu": true,
-      "batchSize": 65536
+      "batchSize": 262144
     },
     "mode": "continuous",
     "continuousRoundSeconds": 30,
