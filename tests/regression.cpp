@@ -643,6 +643,31 @@ void concavePocketRelocation() {
   require(improvesLayout({0,0,2,1000},{0,0,3,0}),"Spread displaced the primary compactness objective");
   require(improvesLayout({0,0,10,1000},{0,1,0,0}),"Spread displaced the stock objective");
 }
+void concavePocketAngleCoverage() {
+  for(int rotations:{48,3600}) {
+    auto cfg=settings();cfg.spacing=cfg.sheetSpacing=cfg.holeSpacing=0;
+    cfg.timeLimitSeconds=5;cfg.searchIteration=3;
+    const auto sheet=rectangle(7,11,50,50,77);
+    auto host=rectangle(0,0,12,4,1);
+    host.points={{0,0,true},{12,0,true},{12,1.5,true},{3,1.5,true},
+                 {3,2.5,true},{12,2.5,true},{12,4,true},{0,4,true}};
+    const double step=360.0/rotations;
+    auto donor=rotatePolygon(rectangle(0,0,8,rotations==48 ? 0.9 : 0.9999,2),-step);
+    donor.allowedAngles.clear();
+    for(int i=0;i<rotations;++i) donor.allowedAngles.push_back(i*step);
+    const std::vector<Polygon> parts{host,donor};
+    Placement a;a.id=1;a.x=7;a.y=11;
+    Placement b;b.id=2;b.x=31;b.y=31;
+    PlacementResult initial;initial.placements.push_back({sheet.source,sheet.id,{a,b}});
+    initial.area=polygonMaterialArea(host)+polygonMaterialArea(donor);initial.totalarea=2500;
+    BitmapNestingStats stats;
+    const auto repaired=refillBitmapLayout({sheet},parts,initial,cfg,&stats);
+    require(stats.pocketRelocations==1,"Pocket pass cadence permanently skipped the fitting angle");
+    valid(sheet,parts,repaired,cfg);
+    const auto placed=transformed(parts,repaired)[1];
+    require(!hasMaterialOutsideSheet(placed,rectangle(10,12.5,9,1),cfg),"Rotated donor missed the thin pocket");
+  }
+}
 void residentGpuOccupancies() {
   std::vector<GpuDeviceInfo> devices;try {devices=listGpuDevices();}catch(...) {return;}
   if(devices.empty()) return;
@@ -782,7 +807,7 @@ int main(int argc,char** argv) {
     if(argc==2 && std::string(argv[1])=="--raster-boundary-only") {
       refillSeedRasterRoundoff();std::cout<<"Raster boundary regression passed\n";return 0;
     }
-    refillSeedRasterRoundoff();concavePocketRelocation();interlockingGroups();continuousContactPortfolio();incumbentRefill();residentGpuOccupancies();parallelRecursivePartitions();recursiveDuplicateSkipPruning();recursiveTreeAndGpuParity();restartAnchorAngles();timedSeedLeavesPortfolioBudget();sparseRejectionBudgetAndFailureEpochs();gpuOrderedBatchParity();stockObstaclesInBottomLeftSearch();fractionalHoleAndSheetMargins();modeSearchAndRefinement();bottomLeftSearch();scanlines();freeRectangleProof();mixedPanelsAndMultipleSheets();duplicateContours();holesFirst();rotatedAndMultipleHoles();concavePocket();rowsAndGpuPolicy();interrupted();mixedOneAngleWorkers();repeatedInsertsAfterHoleFills();singletonWindowExpansion();timedAlternatives();gpuFailurePolicy();gpuFastPathsWhenAvailable();
+    refillSeedRasterRoundoff();concavePocketAngleCoverage();concavePocketRelocation();interlockingGroups();continuousContactPortfolio();incumbentRefill();residentGpuOccupancies();parallelRecursivePartitions();recursiveDuplicateSkipPruning();recursiveTreeAndGpuParity();restartAnchorAngles();timedSeedLeavesPortfolioBudget();sparseRejectionBudgetAndFailureEpochs();gpuOrderedBatchParity();stockObstaclesInBottomLeftSearch();fractionalHoleAndSheetMargins();modeSearchAndRefinement();bottomLeftSearch();scanlines();freeRectangleProof();mixedPanelsAndMultipleSheets();duplicateContours();holesFirst();rotatedAndMultipleHoles();concavePocket();rowsAndGpuPolicy();interrupted();mixedOneAngleWorkers();repeatedInsertsAfterHoleFills();singletonWindowExpansion();timedAlternatives();gpuFailurePolicy();gpuFastPathsWhenAvailable();
     std::cout<<"All nesting regression checks passed\n";return 0;
   } catch(const std::exception& e) {std::cerr<<e.what()<<"\n";return 1;}
 }

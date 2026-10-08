@@ -53,8 +53,11 @@ void relocateIntoConcavePockets(const std::vector<Polygon>& sheets,const std::ve
           if(oldBounds.x+oldBounds.width/2+oldBounds.y+oldBounds.height/2<=pb.x+pb.y) continue;
           std::vector<double> angles{layout.sheetplacements[donor].rotation};
           const size_t samples=std::min<size_t>(16,source.allowedAngles.size());
+          // Pocket repair runs every third iteration. Advance by its own pass
+          // index so angle counts divisible by three do not lose orientations.
+          const uint64_t pocketPass=config.searchIteration/3;
           for(size_t i=0;i<samples;++i) {
-            const double angle=source.allowedAngles[(i*source.allowedAngles.size()/samples+config.searchIteration)%source.allowedAngles.size()];
+            const double angle=source.allowedAngles[(i*source.allowedAngles.size()/samples+pocketPass)%source.allowedAngles.size()];
             if(std::find(angles.begin(),angles.end(),angle)==angles.end()) angles.push_back(angle);
           }
           double bestCost=oldCost;
