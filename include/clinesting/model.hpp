@@ -112,6 +112,8 @@ struct Config {
   bool continuous{false};
   SearchMode mode{SearchMode::First};
   double continuousRoundSeconds{30.0};
+  bool reusableOffcutEnabled{true}; // Measure offcut only before publishing continuous improvements.
+  double reusableOffcutMinWidthMm{5.0};
   uint64_t searchIteration{0}; // Internal restart variation; zero keeps the original strategies.
   std::function<void(const std::string&)> searchProgress; // Serialized periodic diagnostics.
   std::function<bool()> stopRequested; // Internal, thread-safe cooperative cancellation hook.

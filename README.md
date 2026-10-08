@@ -229,6 +229,7 @@ These keys are accepted in settings, config or CLI-nesting.
 | `mode` | Inferred, normally first | first, timed, continuous; controls duration and saving behavior below |
 | `timeLimitSeconds` | 0 | 0..86400, including fractions; timed requires a positive total budget, first requires 0, continuous ignores it |
 | `continuousRoundSeconds` | 30 | 0.01..86400; timed restart budget; continuous uses this only for its initial fast layout |
+| `reusableOffcut` | enabled, 5 mm | Boolean or `{enabled,minWidthMm}`; measure the largest usable offcut only before publishing a continuous improvement |
 | `continuous` | false | Legacy boolean; without mode, true selects continuous. With mode it must agree: true only for continuous |
 | `threads` | Hardware logical CPU count, at least 1 | Explicit integer 1..256; CPU search worker budget. Driver/OS threads are separate and serial phases cannot use all workers |
 | `trials` | 2 | Integer 1..4: compact, then holes_first_rows, large_first, small_first. More strategies cost more time/memory. First mode and jobs with fewer than six copies and no part holes use one |
@@ -334,10 +335,69 @@ First/timed modes do not automatically clear the results directory.
 
 Timed/continuous search prefers, in order: fewer unplaced copies, less unused
 material in used sheets (usedSheetWasteArea), then less unused area inside occupied
-bounding rectangles (compactWasteArea). For identical parts on identical stock,
+bounding rectangles (compactWasteArea). Equal envelopes are broken by
+`placementSpreadCost`: the sum of each part's material area multiplied by its
+bounding-box centre's X+Y distance from that sheet's lower-left bounds origin.
+This fourth objective retains useful inward moves even before an outermost part
+can move; it never overrides completeness, stock waste or envelope area.
+For identical parts on identical stock,
 physical scrap area is constant; rearrangement can still improve compactness and
 remnant shape. Clearances remain unused material in the statistics. Search is
 heuristic: global optimality and further improvements are not guaranteed.
+
+### Reusable offcut report before publication
+
+Continuous mode measures the largest usable connected offcut exactly once after
+accepting a new improvement, immediately before its publication callback writes
+JSON. This is a report only: the original completeness, stock waste, bounding area
+and spread objectives still select the results. Rejected candidates perform no
+such work. There is no periodic evaluation, sampling, throttle, or additional
+recursive publication. A smaller offcut does not veto an otherwise improved layout.
+The frequency follows actual result publications and can be high at startup.
+
+The report is enabled by default. Set
+`"reusableOffcut":{"enabled":true,"minWidthMm":5}` inside `config` to adjust the
+width threshold, or `"reusableOffcut":false` to disable the report. The minimum
+width must be positive and at most 1,000,000 mm. First and timed modes do not
+perform this continuous-publication measurement.
+
+The CPU/Clipper2 evaluator first excludes reserved clearance bands: each part's
+outer boundary expands by the full configured `spacing`, part holes shrink by
+`partToHole`, sheet edges shrink by `partToSheet`, and stock cutouts expand by
+`partToHole`. For example, a 12 mm gap between parts with `spacing:12` contributes
+no reusable area. A reusable region must lie outside both clearance bands; bands
+overlap rather than being double-counted. Zero clearances retain the previous result.
+The evaluator offsets the remaining eligible material inward by half the minimum
+width and finds connected cores. Each
+core is expanded back separately and clipped to the eligible material, so recovery
+cannot restore excluded clearance strips. Separate
+pieces and untouched sheets are never added together. Part holes and stock cutouts
+are retained. This is a morphological estimate of reusable material, not a minimum
+length requirement for individual contour segments or an exact physical cut plan.
+Boolean geometry uses 0.000001 mm coordinate quantization; rounded offsets use an
+arc tolerance of at most 0.001 mm. The output is a polygon. Precision applies to
+the input polygons; it cannot restore details already approximated during import.
+A selected layout's measurement completes before publishing, including when
+cancellation arrives during that measurement.
+
+Result JSON includes `reusableOffcut.area` in mm2, `sheetId`, `points`, `holes`,
+`arcToleranceMm`, `freeArea`, `coreArea`, and `components`. `evaluationStage` is
+`before-publish`; `evaluations` counts published layouts and `totalEvaluationMs`
+accumulates their measurement time. A numbered snapshot's diagnostics reflect the
+moment it was published. `otherFreeArea` means all remaining free material,
+including other potentially usable pieces, not solely unusable scrap.
+`freeArea` remains total physical free material, including clearance strips.
+`availableArea` excludes those strips, `clearanceExcludedArea` records their union
+area within the used stock, and `otherAvailableArea` is eligible material outside
+the reported largest offcut. `reusableOffcut.clearances` records the applied values.
+Total utilisation remains unchanged for the same parts on the same sheets. The
+FreeCAD percentage display still reports that total; the new area is available
+in the CLI progress log and JSON.
+
+Build the normal test targets and run `clinesting_tests --offcut-only` for focused
+regressions, including enabled/disabled publication sequence parity.
+`measure_saved_offcut input.json result.json measured.json 20` measures an existing
+result repeatedly without running a search and writes its offcut contour.
 
 ## OpenCL GPU options
 
@@ -420,6 +480,9 @@ CAD exchange file, not JSON with a changed extension.
 | `gpu.batches`, `candidates`, `fallbackReason` | GPU diagnostics. Timed totals cover restarts; continuous snapshots describe the candidate strategy |
 | `usedSheetWasteArea` | Unused material in used sheets, mm squared, excluding holes and unused sheets |
 | `occupiedBoundsArea`, `compactWasteArea` | Occupied raster bounding-rectangle area and unused area within it |
+| `reusableOffcut` | Largest usable connected offcut contour/area, width filter and evaluation diagnostics; see quality objective |
+| `placementSpreadCost` | Area-weighted X+Y bounds-centre distance from the respective stock origin (mm cubed); lower breaks equal-envelope ties |
+| `pocketRelocations` | Already placed copies relocated into open concavities in the selected repair candidate |
 | `utilisation` | Legacy percentage against processed stock material; not the sole quality criterion |
 
 ## Command-line reference
@@ -631,7 +694,15 @@ GPU setup for large batches:
 "gpu": {"enabled": true, "device": -1, "fallbackToCpu": true, "batchSize": 262144}
 ```
 
-Unique shape/orientation masks are uploaded once as an atlas (up to 512 MiB).
+The shared rotation atlas reserves up to 512 MiB, but pixel ranges are generated
+and uploaded only when recursion first reaches the corresponding shape/angle
+policy. Both recursive workers reuse each uploaded range. Filtering and reversible
+occupancy updates reject any mask whose pixels have not been uploaded yet.
+Rotated collision geometry does not duplicate the complete angle list or output
+metadata for every rotation; this avoids quadratic angle-policy memory growth.
+For continuous jobs with more than 360 allowed angles, only the initial fast seed
+uses an evenly sampled subset of 360 existing allowed angles. The recursive tree
+still searches the complete input angle list, including 3600-angle policies.
 The GPU generates implicit grid coordinates and filters up to 262144 candidates
 per dispatch; only one-byte validity flags are read back, not coordinate arrays.
 Flags stay on the CPU frame while its descendants are explored. GPU occupancy
@@ -701,7 +772,16 @@ into a feasible branch, while sparse searches still use the configured maximum.
 The candidate order and finite search tree remain unchanged.
 
 Incumbent repair (used by the CPU companion trials in hybrid continuous search):
-`refillBitmapLayout` compacts a copy of a validated layout, optionally releases a
+Every third repair variation first searches open concavities (convex hull minus
+outer contour) for copies already placed elsewhere on the same sheet. It uses
+inner-NFP proposals, the copy's existing orientation and up to 16 rotating allowed
+angle samples. Proposals must fit inside the pocket and pass exact stock and
+pairwise clearance checks against all other parts. Positive part spacing insets
+the pocket conservatively. Only moves decreasing the spread cost are committed;
+placing a copy inside a retained host's hull cannot enlarge the sheet envelope.
+This is a bounded heuristic and does not prove every usable pocket was found.
+
+`refillBitmapLayout` otherwise compacts a copy of a validated layout, optionally releases a
 small neighbourhood, and tries CPU refill using rotating angle shortlists plus
 the removed parts' original orientations. Callers must compare the returned
 candidate against the incumbent and discard regressions. Regression tests cover

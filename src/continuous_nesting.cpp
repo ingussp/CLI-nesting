@@ -21,7 +21,7 @@ LayoutQuality layoutQuality(const std::vector<Polygon>& sheets,const PlacementRe
     usedArea+=polygonMaterialArea(*sheet);
   }
   return {result.unplaced.size(),std::max(0.0,usedArea-result.area),
-          std::max(0.0,stats.occupiedBoundsArea-result.area)};
+          std::max(0.0,stats.occupiedBoundsArea-result.area),stats.placementSpreadCost};
 }
 // Compare layouts by completeness, stock waste and compactness.
 bool improvesLayout(const LayoutQuality& candidate,const LayoutQuality& incumbent) {
@@ -31,7 +31,9 @@ bool improvesLayout(const LayoutQuality& candidate,const LayoutQuality& incumben
     return a<b-tolerance ? -1 : a>b+tolerance ? 1 : 0;
   };
   const int waste=compare(candidate.usedSheetWasteArea,incumbent.usedSheetWasteArea);
-  return waste<0 || (waste==0 && compare(candidate.compactWasteArea,incumbent.compactWasteArea)<0);
+  if(waste!=0) return waste<0;
+  const int compact=compare(candidate.compactWasteArea,incumbent.compactWasteArea);
+  return compact<0 || (compact==0 && compare(candidate.placementSpreadCost,incumbent.placementSpreadCost)<0);
 }
 
 // Coordinate timed restarts or systematic continuous rounds; retain improvements.
@@ -84,6 +86,7 @@ static OrchestratorRunStats optimize(BackgroundRequest request,const std::functi
     candidateWorkers=std::max(candidateWorkers,stats.candidateWorkersUsed);
   };
   std::string gpuDevice,gpuFallback;
+  size_t offcutEvaluations=0;double offcutMs=0;
   auto consider=[&](const PlacementResult& placement,const BitmapNestingStats& stats) {
     std::lock_guard lock(incumbentMutex);
     const auto quality=layoutQuality(request.sheets,placement,stats);
@@ -95,6 +98,16 @@ static OrchestratorRunStats optimize(BackgroundRequest request,const std::functi
     if(hybrid) {result.bitmapStats.continuousPortfolio=true;result.bitmapStats.cpuWorkersUsed=configuredWorkers;}
     result.timings.bitmapMs=stats.totalBitmapMs;
     result.timings.placementMs=stats.totalBitmapMs;
+    // The original search objective has already accepted this layout. Measure
+    // exactly once before publishing; never score rejected candidates or veto
+    // a selected result because of its offcut area or a late cancellation.
+    if(!timed && request.config.reusableOffcutEnabled) {
+      result.bitmapStats.reusableOffcut=measureReusableOffcut(request.sheets,
+          request.individual.placement,placement,request.config);
+      offcutMs+=result.bitmapStats.reusableOffcut.elapsedMs;++offcutEvaluations;
+      result.bitmapStats.offcutEvaluations=offcutEvaluations;
+      result.bitmapStats.offcutEvaluationMs=offcutMs;
+    }
     result.timings.totalMs=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-started).count();
     onImprovement(request,result,sequence+1);
     best=result;
@@ -118,6 +131,12 @@ static OrchestratorRunStats optimize(BackgroundRequest request,const std::functi
     auto seed=request;
     seed.config.mode=SearchMode::First;
     seed.config.bitmapTrials=1;
+    // Dense continuous jobs need a quick incumbent before the full-angle workers
+    // start. Restrict only this seed copy; recursion retains every input angle.
+    if(recursive) for(auto& part:seed.individual.placement) if(part.allowedAngles.size()>360) {
+      const auto allowed=std::move(part.allowedAngles);part.allowedAngles.clear();
+      for(size_t i=0;i<360;++i) part.allowedAngles.push_back(allowed[i*allowed.size()/360]);
+    }
     seed.config.timeLimitSeconds=timed ? std::max(0.000001,std::min({budget*0.2,
         request.config.continuousRoundSeconds,std::chrono::duration<double>(end-std::chrono::steady_clock::now()).count()})) : request.config.continuousRoundSeconds;
     const auto initial=orchestrator.runWithStats(seed,sink,consider);

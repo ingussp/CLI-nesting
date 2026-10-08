@@ -50,6 +50,13 @@ namespace {
 
 constexpr size_t kMaxBitmapPixels = 200000000ULL;
 
+// Break equal-envelope ties without changing completeness, stock use or bounds priority.
+double placementSpreadCost(const Polygon& absolute,const Bounds& sheetBounds) {
+  const auto b=getPolygonBounds(absolute.points);
+  return polygonMaterialArea(absolute)*
+      (b.x+b.width/2-sheetBounds.x+b.y+b.height/2-sheetBounds.y);
+}
+
 // Accumulate elapsed time into a search-phase counter on scope exit.
 struct PhaseTimer {
   double& total;
@@ -138,6 +145,7 @@ void refineVectors(const std::vector<Polygon>& sheets,const std::vector<Polygon>
   for(const auto& p:parts) if(p.id) byId.emplace(*p.id,&p);
   bool stopped=false;
   double occupied=0;
+  stats.placementSpreadCost=0;
   for(auto& layout:result.placements) {
     const auto sheet=std::find_if(sheets.begin(),sheets.end(),[&](const Polygon& p){return p.id==layout.sheetid;});
     if(sheet==sheets.end()) throw std::runtime_error("Unknown sheet in vector refinement");
@@ -218,7 +226,10 @@ void refineVectors(const std::vector<Polygon>& sheets,const std::vector<Polygon>
       if(!moved) break;
     }
     double right=0,top=0;
-    for(const auto& p:absolute) {auto b=getPolygonBounds(p.points);right=std::max(right,b.x+b.width-sb.x);top=std::max(top,b.y+b.height-sb.y);}
+    for(const auto& p:absolute) {
+      auto b=getPolygonBounds(p.points);right=std::max(right,b.x+b.width-sb.x);top=std::max(top,b.y+b.height-sb.y);
+      stats.placementSpreadCost+=placementSpreadCost(p,sb);
+    }
     occupied+=right*top;
   }
   stats.occupiedBoundsArea=occupied;
@@ -417,7 +428,12 @@ void rowsOrScalar(uint64_t* occ, const uint64_t* mask, size_t words) {
 RasterMask rasterizePartMask(const Polygon& part, double rotationDeg, double resolutionMm, double tolerance) {
   RasterMask mask;
   mask.rotationDeg = rotationDeg;
-  mask.rotatedPart = rotatePolygon(part, rotationDeg);
+  // Copy geometry only: duplicating the complete angle policy for every mask
+  // makes R rotations consume O(R squared) memory. Output metadata stays on the
+  // original part and must not be copied hundreds of thousands of times here.
+  Polygon geometry;
+  geometry.points=part.points;geometry.children=part.children;geometry.geometryKey=part.geometryKey;
+  mask.rotatedPart = rotatePolygon(geometry, rotationDeg);
   mask.rotatedPart.rotation = rotationDeg;
   mask.rotatedPart.id = part.id;
   mask.rotatedPart.source = part.source;
@@ -670,6 +686,9 @@ bool maskFits(const BitmapGrid& occupancy,
 
 // Commit an accepted mask to the sheet occupancy bitmap.
 void applyMask(BitmapGrid& occupancy, const RasterMask& mask, int originX, int originY, bool useAvx2) {
+  if(originX<0 || originY<0 || mask.widthPx>occupancy.widthPx || mask.heightPx>occupancy.heightPx ||
+      originX>occupancy.widthPx-mask.widthPx || originY>occupancy.heightPx-mask.heightPx)
+    throw std::out_of_range("Mask commit exceeds the sheet bitmap");
   const int wordShift = originX / 64;
   const int bitShift = originX % 64;
 
@@ -764,6 +783,7 @@ std::vector<Point> clearanceContacts(const Polygon& nfp,const Config& config) {
 
 #include "interlocking_pattern.hpp"
 #include "group_pattern_search.hpp"
+#include "concave_pocket_repair.hpp"
 
 // Begin with disjoint cells; continuous group trials also fit their contours.
 PairPattern makePairPattern(const std::vector<const RasterMask*>& masks, int sheetW, int sheetH,
@@ -943,12 +963,16 @@ PlacementResult placePartsBitmapOnSingleSheet(const Polygon& sheet,
       deadline.check();
       auto mask=std::make_unique<RasterMask>(rasterizePartMask(absolute,0,config.bitmapResolutionMm,config.curveTolerance));
       const auto b=getPolygonBounds(absolute.points);
-      const int x=int(std::floor((b.x-sheetBounds.x)/config.bitmapResolutionMm));
-      const int y=int(std::floor((b.y-sheetBounds.y)/config.bitmapResolutionMm));
+      if(hasMaterialOutsideSheet(absolute,sheet,config))
+        throw std::invalid_argument("Refill seed lies outside the sheet material");
+      // Exact-valid boundary coordinates can straddle a pixel edge by roundoff.
+      // Clip only the raster storage extent; keep the vector geometry unchanged.
+      const int x=std::clamp(int(std::floor((b.x-sheetBounds.x)/config.bitmapResolutionMm)),0,material.widthPx-1);
+      const int y=std::clamp(int(std::floor((b.y-sheetBounds.y)/config.bitmapResolutionMm)),0,material.heightPx-1);
       mask->minX=sheetBounds.x+x*config.bitmapResolutionMm;
       mask->minY=sheetBounds.y+y*config.bitmapResolutionMm;
-      mask->widthPx=rasterDimension(b.x+b.width-mask->minX,config.bitmapResolutionMm);
-      mask->heightPx=rasterDimension(b.y+b.height-mask->minY,config.bitmapResolutionMm);
+      mask->widthPx=std::min(material.widthPx-x,rasterDimension(b.x+b.width-mask->minX,config.bitmapResolutionMm));
+      mask->heightPx=std::min(material.heightPx-y,rasterDimension(b.y+b.height-mask->minY,config.bitmapResolutionMm));
       mask->wordsPerRow=size_t((mask->widthPx+63)/64);
       mask->contacts.clear();
       for(const auto& p:absolute.points) mask->contacts.push_back({(p.x-mask->minX)/config.bitmapResolutionMm,(p.y-mask->minY)/config.bitmapResolutionMm,true});
@@ -1732,6 +1756,7 @@ PlacementResult placePartsBitmapOnSingleSheet(const Polygon& sheet,
 
   localStats.cachedMaskCount = maskCache.size();
   localStats.occupiedBoundsArea = double(usedWidth) * usedHeight * config.bitmapResolutionMm * config.bitmapResolutionMm;
+  for(const auto& absolute:placedAbsolute) localStats.placementSpreadCost+=placementSpreadCost(absolute,sheetBounds);
   localStats.simdBackend = useAvx2 ? "avx2" : "scalar";
   localStats.totalBitmapMs =
       std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - bitmapStart).count();
@@ -1762,7 +1787,9 @@ PlacementResult refillBitmapLayout(const std::vector<Polygon>& sheets,
   cfg.bitmapBottomLeft=true;cfg.mode=SearchMode::First;
   // On later passes release a small spatial neighbourhood, including early
   // placements that depth-first backtracking may not revisit for hours.
-  if(cfg.searchIteration>0 && !result.placements.empty()) {
+  const bool pocketPass=cfg.searchIteration%3==0;
+  if(pocketPass) relocateIntoConcavePockets(sheets,parts,result,cfg,deadline,counts);
+  if(!pocketPass && cfg.searchIteration>0 && !result.placements.empty()) {
     auto& layout=result.placements[(cfg.searchIteration-1)%result.placements.size()];
     if(!layout.sheetplacements.empty()) {
       const auto anchor=layout.sheetplacements[(cfg.searchIteration-1)%layout.sheetplacements.size()];
@@ -1785,7 +1812,7 @@ PlacementResult refillBitmapLayout(const std::vector<Polygon>& sheets,
       layout.sheetplacements=std::move(kept);
     }
   }
-  refineVectors(sheets,parts,result,cfg,deadline,counts);
+  if(!counts.pocketRelocations) refineVectors(sheets,parts,result,cfg,deadline,counts);
   ParallelLoop parallel(1);
   detail::RejectionCacheBudget rejectionBudget(16*1024*1024);
   std::unique_ptr<GpuBitmap> gpu;
@@ -1824,7 +1851,7 @@ PlacementResult refillBitmapLayout(const std::vector<Polygon>& sheets,
     remaining=std::move(filled.unplaced);
   }
   // Restore original complete angle policies for every still-unplaced copy.
-  result.unplaced.clear();result.area=0;result.totalarea=0;counts.occupiedBoundsArea=0;
+  result.unplaced.clear();result.area=0;result.totalarea=0;counts.occupiedBoundsArea=0;counts.placementSpreadCost=0;
   std::unordered_set<int> placed;
   for(const auto& layout:result.placements) {
     const auto sheet=std::find_if(sheets.begin(),sheets.end(),[&](const auto& p){return p.id==layout.sheetid;});
@@ -1834,6 +1861,7 @@ PlacementResult refillBitmapLayout(const std::vector<Polygon>& sheets,
       placed.insert(placement.id.value());
       const auto source=std::find_if(parts.begin(),parts.end(),[&](const auto& p){return p.id==placement.id;});
       const auto geometry=shiftPolygon(rotatePolygon(*source,placement.rotation),{placement.x,placement.y,true});
+      counts.placementSpreadCost+=placementSpreadCost(geometry,sb);
       const auto b=getPolygonBounds(geometry.points);right=std::max(right,b.x+b.width-sb.x);top=std::max(top,b.y+b.height-sb.y);
       left=std::min(left,b.x-sb.x);bottom=std::min(bottom,b.y-sb.y);
     }
@@ -2039,6 +2067,8 @@ PlacementResult placePartsBitmap(const std::vector<Polygon>& sheets,
           t.vectorRefinementCompleted=t.vectorRefinementCompleted && s.vectorRefinementCompleted;
           t.candidateWorkersUsed=std::max(t.candidateWorkersUsed,s.candidateWorkersUsed);
           t.occupiedBoundsArea+=s.occupiedBoundsArea;
+          t.placementSpreadCost+=s.placementSpreadCost;
+          t.pocketRelocations+=s.pocketRelocations;
           t.perPart.insert(t.perPart.end(),s.perPart.begin(),s.perPart.end());
         }
         trial.result.unplaced=std::move(remaining);
@@ -2073,7 +2103,7 @@ PlacementResult placePartsBitmap(const std::vector<Polygon>& sheets,
   }
   if (error) std::rethrow_exception(error);
   auto scoreTrial=[](const Trial& t) {
-    return std::tuple{t.result.unplaced.size(),t.result.totalarea-t.result.area,t.stats.occupiedBoundsArea};
+    return std::tuple{t.result.unplaced.size(),t.result.totalarea-t.result.area,t.stats.occupiedBoundsArea,t.stats.placementSpreadCost};
   };
   size_t best=0;
   bool haveBest=false;

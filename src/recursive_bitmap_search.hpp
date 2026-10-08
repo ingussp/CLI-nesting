@@ -11,6 +11,7 @@ class RecursiveGpuBroker {
   std::condition_variable ready_;
   uint64_t next_{0},serving_{0};
   bool atlasReady_{false};
+  std::unordered_set<uint32_t> readyPolicies_;
   size_t sheet_{SIZE_MAX};
   struct Lease {
     RecursiveGpuBroker& broker;
@@ -27,6 +28,11 @@ class RecursiveGpuBroker {
     Lease turn(*this);
     if(atlasReady_) return;
     loader(device_);atlasReady_=true;
+  }
+  template<class Loader> void preparePolicy(uint32_t first,Loader&& loader) {
+    Lease turn(*this);
+    if(readyPolicies_.contains(first)) return;
+    loader(device_);readyPolicies_.insert(first);
   }
   std::vector<uint8_t> filter(size_t owner,size_t sheet,const BitmapGrid& material,
       const BitmapGrid& occupied,std::vector<RecursiveGpuUpdate>& updates,uint64_t first,
@@ -68,7 +74,7 @@ PlacementResult recursiveBitmapSearch(const std::vector<Polygon>& sheets,
   counts.cpuWorkersUsed=parallel.size();
   PlacementResult best;best.unplaced=parts;
   size_t bestCount=0;
-  double bestWaste=std::numeric_limits<double>::infinity(),bestBounds=bestWaste;
+  double bestWaste=std::numeric_limits<double>::infinity(),bestBounds=bestWaste,bestSpread=bestWaste;
   struct Stock {
     Bounds bounds;
     BitmapGrid material,occupied;
@@ -117,24 +123,29 @@ PlacementResult recursiveBitmapSearch(const std::vector<Polygon>& sheets,
   double placedArea=0;
   auto publish=[&] {
     if(placedCount<bestCount) return;
-    double stockArea=0,boundsArea=0;
+    double stockArea=0,boundsArea=0,spread=0;
     for(size_t s=0;s<stocks.size();++s) if(!stocks[s].placed.empty()) {
       stockArea+=polygonMaterialArea(sheets[s]);
       std::vector<Point> points;
-      for(const auto& p:stocks[s].geometry) points.insert(points.end(),p.points.begin(),p.points.end());
+      const auto sb=getPolygonBounds(sheets[s].points);
+      for(const auto& p:stocks[s].geometry) {
+        points.insert(points.end(),p.points.begin(),p.points.end());
+        spread+=placementSpreadCost(p,sb);
+      }
       const auto bounds=getPolygonBounds(points);boundsArea+=bounds.width*bounds.height;
     }
     const double waste=stockArea-placedArea;
     if(placedCount<bestCount || (placedCount==bestCount &&
-        (waste>bestWaste+1e-8 || (std::abs(waste-bestWaste)<=1e-8 && boundsArea>=bestBounds-1e-8)))) return;
-    bestCount=placedCount;bestWaste=waste;bestBounds=boundsArea;
+        (waste>bestWaste+1e-8 || (std::abs(waste-bestWaste)<=1e-8 &&
+        (boundsArea>bestBounds+1e-8 || (std::abs(boundsArea-bestBounds)<=1e-8 && spread>=bestSpread-1e-8)))))) return;
+    bestCount=placedCount;bestWaste=waste;bestBounds=boundsArea;bestSpread=spread;
     best={};best.area=placedArea;best.totalarea=stockArea;
     for(size_t s=0;s<stocks.size();++s) if(!stocks[s].placed.empty())
       best.placements.push_back({sheets[s].source,sheets[s].id,stocks[s].placed});
     for(size_t i=0;i<parts.size();++i) if(!placed[i]) best.unplaced.push_back(parts[i]);
     best.fitness=double(best.unplaced.size());
     best.utilisation=stockArea>0 ? 100*placedArea/stockArea : 0;
-    counts.occupiedBoundsArea=boundsArea;counts.placedParts=placedCount;
+    counts.occupiedBoundsArea=boundsArea;counts.placementSpreadCost=spread;counts.placedParts=placedCount;
     counts.unplacedParts=best.unplaced.size();counts.acceptedPlacements=placedCount;
     counts.totalBitmapMs=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-started).count();
     if(onLayout) onLayout(best,counts);
@@ -166,15 +177,16 @@ PlacementResult recursiveBitmapSearch(const std::vector<Polygon>& sheets,
     }
     if(gpu && !masks.empty()) try {
       gpu->prepare([&](GpuBitmap& device) {
-        std::vector<GpuMaskInfo> atlas;std::vector<uint64_t> words;
+        std::vector<GpuMaskInfo> atlas;size_t words=0;
         for(const auto& item:masks) {
-          deadline.check();pixels.ensure(*item);const auto& m=*item;
-          if(words.size()+m.bits.size()>64ULL*1024*1024)
+          deadline.check();const auto& m=*item;
+          const size_t size=m.wordsPerRow*size_t(m.heightPx);
+          if(words+size>64ULL*1024*1024)
             throw std::runtime_error("Recursive rotation atlas exceeds 512 MiB");
-          atlas.push_back({uint32_t(m.widthPx),uint32_t(m.heightPx),uint32_t(m.wordsPerRow),uint32_t(words.size())});
-          words.insert(words.end(),m.bits.begin(),m.bits.end());
+          atlas.push_back({uint32_t(m.widthPx),uint32_t(m.heightPx),uint32_t(m.wordsPerRow),uint32_t(words)});
+          words+=size;
         }
-        device.setMasks(atlas,words);
+        device.allocateMasks(atlas,words);
       });
     } catch(const std::exception& e) {gpuFailure(e);}
     counts.cachedMaskCount=masks.size();
@@ -265,6 +277,21 @@ PlacementResult recursiveBitmapSearch(const std::vector<Polygon>& sheets,
         const uint32_t batch=uint32_t(std::min<uint64_t>(limit,total-frame.next));
         frame.batchSize=std::min<uint32_t>(config.gpuBatchSize,limit*2);
         if(gpu) try {
+          // Upload only the policy reached by this branch. Other parts' pixels
+          // remain unbuilt, and both CPU workers reuse each uploaded range.
+          const auto fullPolicy=policies[depth];
+          gpu->preparePolicy(fullPolicy.first,[&](GpuBitmap& device) {
+            std::vector<uint64_t> words;
+            size_t size=0;
+            for(size_t i=fullPolicy.first;i<size_t(fullPolicy.first)+fullPolicy.count;++i)
+              size+=masks[i]->wordsPerRow*size_t(masks[i]->heightPx);
+            words.reserve(size);
+            for(size_t i=fullPolicy.first;i<size_t(fullPolicy.first)+fullPolicy.count;++i) {
+              deadline.check();pixels.ensure(*masks[i]);
+              words.insert(words.end(),masks[i]->bits.begin(),masks[i]->bits.end());
+            }
+            device.uploadMaskRange(fullPolicy.first,fullPolicy.count,words);
+          });
           frame.flags=gpu->filter(worker,frame.sheet,stock.material,stock.occupied,gpuUpdates,
               frame.next,batch,rows,step,policy.first,policy.count,edge,gpuTiming);
           ++counts.gpuBatches;counts.gpuCandidates+=batch;

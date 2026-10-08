@@ -211,6 +211,7 @@ int main(int argc,char** argv) {
         std::cout<<"Saved result"<<sequence<<".json"<<(dxf ? " + DXF" : "")<<(svg ? " + SVG" : "")
           <<"; placed: "<<candidate.individual.placement.size()-quality.unplaced
           <<"; sheet waste: "<<quality.usedSheetWasteArea<<" mm2; compact waste: "<<quality.compactWasteArea
+          <<" mm2; reusable offcut: "<<(result.bitmapStats.reusableOffcut.evaluated ? result.bitmapStats.reusableOffcut.area : -1)
           <<" mm2; restart: "<<candidate.config.searchIteration<<"\n"<<std::flush;
         if(sequence==1 && request.output.openPreview) preview(results.path()/"result1.svg");
       });
@@ -219,6 +220,9 @@ int main(int argc,char** argv) {
         " duplicateSkips="+std::to_string(finalStats.bitmapStats.recursiveDuplicateSkips)+
         " exhausted="+std::to_string(finalStats.bitmapStats.recursiveExhausted)+
         " cancelled="+std::to_string(finalStats.bitmapStats.cancelled));
+      if(request.config.reusableOffcutEnabled) request.config.searchProgress(
+        "Offcut finished: evaluations="+std::to_string(finalStats.bitmapStats.offcutEvaluations)+
+        " evaluationMs="+std::to_string(finalStats.bitmapStats.offcutEvaluationMs));
       if(finalStats.bitmapStats.continuousPortfolio) request.config.searchProgress(
         "Contact finished: trials="+std::to_string(finalStats.bitmapStats.contactTrials)+
         " groupTrials="+std::to_string(finalStats.bitmapStats.groupTrials)+

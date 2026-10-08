@@ -155,6 +155,21 @@ void configure(const Json& j,Config& c) {
       if(c.continuousRoundSeconds<0.01 || c.continuousRoundSeconds>86400)
         throw std::invalid_argument("continuousRoundSeconds must be between 0.01 and 86400");
     }
+    else if(k=="reusableOffcut") {
+      if(v.is_boolean()) c.reusableOffcutEnabled=v.get<bool>();
+      else if(v.is_object()) {
+        for(auto option=v.begin();option!=v.end();++option) {
+          if(option.key()=="enabled") {
+            if(!option.value().is_boolean()) throw std::invalid_argument("reusableOffcut.enabled must be boolean");
+            c.reusableOffcutEnabled=option.value().get<bool>();
+          } else if(option.key()=="minWidthMm") {
+            c.reusableOffcutMinWidthMm=number(option.value(),"reusableOffcut.minWidthMm");
+            if(c.reusableOffcutMinWidthMm<=0 || c.reusableOffcutMinWidthMm>1000000)
+              throw std::invalid_argument("reusableOffcut.minWidthMm must be in (0,1000000]");
+          } else throw std::invalid_argument("Unknown reusableOffcut option: "+option.key());
+        }
+      } else throw std::invalid_argument("reusableOffcut must be boolean or an object");
+    }
     else if(k=="timeLimitSeconds") {
       c.timeLimitSeconds=number(v,k);
       if(c.timeLimitSeconds<0 || c.timeLimitSeconds>86400)
@@ -350,6 +365,26 @@ void writeNestingJson(const std::filesystem::path& path,const BackgroundRequest&
   const auto quality=layoutQuality(input.sheets,r,run.bitmapStats);
   out["usedSheetWasteArea"]=quality.usedSheetWasteArea;
   out["occupiedBoundsArea"]=run.bitmapStats.occupiedBoundsArea;
+  out["placementSpreadCost"]=run.bitmapStats.placementSpreadCost;
+  out["pocketRelocations"]=run.bitmapStats.pocketRelocations;
+  const auto& offcut=run.bitmapStats.reusableOffcut;
+  out["reusableOffcut"]={{"enabled",input.config.reusableOffcutEnabled},{"evaluated",offcut.evaluated},
+    {"minWidthMm",input.config.reusableOffcutMinWidthMm},{"backend","cpu-vector"},
+    {"evaluations",run.bitmapStats.offcutEvaluations},{"evaluationStage","before-publish"},
+    {"totalEvaluationMs",run.bitmapStats.offcutEvaluationMs}};
+  if(offcut.evaluated) {
+    auto& j=out["reusableOffcut"];j["area"]=offcut.area;j["coreArea"]=offcut.coreArea;
+    j["freeArea"]=offcut.freeArea;j["otherFreeArea"]=std::max(0.0,offcut.freeArea-offcut.area);
+    j["components"]=offcut.components;j["evaluationMs"]=offcut.elapsedMs;
+    j["arcToleranceMm"]=offcut.arcToleranceMm;
+    j["availableArea"]=offcut.availableArea;j["clearanceExcludedArea"]=offcut.clearanceExcludedArea;
+    j["otherAvailableArea"]=std::max(0.0,offcut.availableArea-offcut.area);
+    j["clearances"]={{"spacing",offcut.spacingMm},{"partToSheet",offcut.sheetSpacingMm},{"partToHole",offcut.holeSpacingMm}};
+    if(offcut.sheetId) j["sheetId"]=*offcut.sheetId;
+    auto points=[](const Polygon& p) {Json result=Json::array();for(const auto& v:p.points) result.push_back({v.x,v.y});return result;};
+    j["points"]=points(offcut.contour);j["holes"]=Json::array();
+    for(const auto& hole:offcut.contour.children) j["holes"].push_back(points(hole));
+  }
   out["compactWasteArea"]=std::max(0.0,run.bitmapStats.occupiedBoundsArea-r.area);
   out["startedTrials"]=run.bitmapStats.startedTrials;
   out["totalStartedTrials"]=run.bitmapStats.totalStartedTrials;
