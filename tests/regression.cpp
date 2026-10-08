@@ -13,6 +13,7 @@
 #include <numbers>
 #include <random>
 #include <stdexcept>
+#include <string>
 
 using namespace clinesting;
 void require(bool value,const char* message) { if(!value) throw std::runtime_error(message); }
@@ -577,6 +578,71 @@ void incumbentRefill() {
   require(stats.cancelled,"Incumbent repair ignored cancellation");
   valid(sheet,parts,stopped,cfg);
 }
+void refillSeedRasterRoundoff() {
+  auto cfg=settings();cfg.spacing=cfg.sheetSpacing=cfg.holeSpacing=0;cfg.timeLimitSeconds=2;
+  const auto sheet=rectangle(-3,7,3,2,77);
+  const std::vector<Polygon> parts{rectangle(0,0,1,1,1),rectangle(0,0,1,1,2)};
+  for(const auto& offset:std::vector<Point>{{-3,7-1e-12,true},{-1,8+1e-12,true}}) {
+    Placement seed;seed.id=1;seed.x=offset.x;seed.y=offset.y;
+    PlacementResult incumbent;incumbent.area=1;incumbent.totalarea=6;
+    incumbent.placements.push_back({sheet.source,sheet.id,{seed}});incumbent.unplaced={parts[1]};
+    BitmapNestingStats stats;
+    const auto result=refillBitmapLayout({sheet},parts,incumbent,cfg,&stats);
+    require(result.unplaced.empty(),"Roundoff at a sheet boundary prevented refill");
+    valid(sheet,parts,result,cfg);
+  }
+}
+void concavePocketRelocation() {
+  auto cfg=settings();cfg.spacing=cfg.sheetSpacing=cfg.holeSpacing=0;
+  cfg.timeLimitSeconds=2;cfg.searchIteration=0;
+  auto sheet=rectangle(7,11,50,50,77);
+  auto host=rectangle(0,0,12,12,1);
+  host.points={{0,0,true},{12,0,true},{12,3,true},{3,3,true},
+               {3,9,true},{12,9,true},{12,12,true},{0,12,true}};
+  auto donor=rectangle(0,0,2,4,2);donor.allowedAngles={90};
+  auto anchor=rectangle(0,0,20,20,3);
+  std::vector<Polygon> parts{host,donor,anchor};
+  Placement a;a.id=1;a.x=7;a.y=11;
+  Placement b;b.id=2;b.x=31;b.y=31;b.rotation=90;
+  Placement c;c.id=3;c.x=37;c.y=41;
+  PlacementResult initial;initial.placements.push_back({sheet.source,sheet.id,{a,b,c}});
+  for(const auto& part:parts) initial.area+=polygonMaterialArea(part);
+  initial.totalarea=2500;
+  BitmapNestingStats before;before.occupiedBoundsArea=50*50;
+  for(const auto& geometry:transformed(parts,initial)) {
+    const auto bounds=getPolygonBounds(geometry.points);
+    before.placementSpreadCost+=polygonMaterialArea(geometry)*(bounds.x+bounds.width/2-7+bounds.y+bounds.height/2-11);
+  }
+  for(double gap:{0.0,0.5}) {
+    cfg.spacing=gap;
+    BitmapNestingStats stats;
+    const auto repaired=refillBitmapLayout({sheet},parts,initial,cfg,&stats);
+    valid(sheet,parts,repaired,cfg);
+    require(repaired.unplaced.empty() && stats.pocketRelocations>0,"Placed donor was not moved into an open concavity");
+    require(stats.occupiedBoundsArea==before.occupiedBoundsArea,"Envelope-tie fixture unexpectedly changed bounds");
+    require(improvesLayout(layoutQuality({sheet},repaired,stats),layoutQuality({sheet},initial,before)),
+            "Useful relocation was rejected when the global envelope stayed unchanged");
+    const auto moved=transformed(parts,repaired)[1];
+    require(!hasMaterialOutsideSheet(moved,rectangle(10,14,9,6),cfg),"Donor missed the concave pocket");
+    require(repaired.placements.front().sheetplacements[1].rotation==90,"Pocket repair used a forbidden angle");
+  }
+  require(initial.placements.front().sheetplacements[1].x==31,"Pocket repair changed its input");
+  cfg.spacing=0;
+  auto blocked=initial;
+  auto blocker=rectangle(0,0,9,6,4);
+  auto blockedParts=parts;blockedParts.push_back(blocker);
+  Placement block;block.id=4;block.x=10;block.y=14;
+  blocked.placements.front().sheetplacements.push_back(block);blocked.area+=54;
+  BitmapNestingStats blockedStats;
+  const auto blockedResult=refillBitmapLayout({sheet},blockedParts,blocked,cfg,&blockedStats);
+  valid(sheet,blockedParts,blockedResult,cfg);
+  require(!blockedStats.pocketRelocations,"Pocket repair ignored an existing pocket occupant");
+  cfg.stopRequested=[]{return true;};BitmapNestingStats stopped;
+  sameLayout(initial,refillBitmapLayout({sheet},parts,initial,cfg,&stopped));
+  require(stopped.cancelled && !stopped.pocketRelocations,"Cancelled pocket repair performed work");
+  require(improvesLayout({0,0,2,1000},{0,0,3,0}),"Spread displaced the primary compactness objective");
+  require(improvesLayout({0,0,10,1000},{0,1,0,0}),"Spread displaced the stock objective");
+}
 void residentGpuOccupancies() {
   std::vector<GpuDeviceInfo> devices;try {devices=listGpuDevices();}catch(...) {return;}
   if(devices.empty()) return;
@@ -711,9 +777,12 @@ void recursiveTreeAndGpuParity() {
   require(large.recursiveExhausted && large.recursiveNodes==small.recursiveNodes && large.recursiveNodes>4096,
           "Growing GPU batches skipped or repeated part of the recursive grid");
 }
-int main() {
+int main(int argc,char** argv) {
   try {
-    interlockingGroups();continuousContactPortfolio();incumbentRefill();residentGpuOccupancies();parallelRecursivePartitions();recursiveDuplicateSkipPruning();recursiveTreeAndGpuParity();restartAnchorAngles();timedSeedLeavesPortfolioBudget();sparseRejectionBudgetAndFailureEpochs();gpuOrderedBatchParity();stockObstaclesInBottomLeftSearch();fractionalHoleAndSheetMargins();modeSearchAndRefinement();bottomLeftSearch();scanlines();freeRectangleProof();mixedPanelsAndMultipleSheets();duplicateContours();holesFirst();rotatedAndMultipleHoles();concavePocket();rowsAndGpuPolicy();interrupted();mixedOneAngleWorkers();repeatedInsertsAfterHoleFills();singletonWindowExpansion();timedAlternatives();gpuFailurePolicy();gpuFastPathsWhenAvailable();
+    if(argc==2 && std::string(argv[1])=="--raster-boundary-only") {
+      refillSeedRasterRoundoff();std::cout<<"Raster boundary regression passed\n";return 0;
+    }
+    refillSeedRasterRoundoff();concavePocketRelocation();interlockingGroups();continuousContactPortfolio();incumbentRefill();residentGpuOccupancies();parallelRecursivePartitions();recursiveDuplicateSkipPruning();recursiveTreeAndGpuParity();restartAnchorAngles();timedSeedLeavesPortfolioBudget();sparseRejectionBudgetAndFailureEpochs();gpuOrderedBatchParity();stockObstaclesInBottomLeftSearch();fractionalHoleAndSheetMargins();modeSearchAndRefinement();bottomLeftSearch();scanlines();freeRectangleProof();mixedPanelsAndMultipleSheets();duplicateContours();holesFirst();rotatedAndMultipleHoles();concavePocket();rowsAndGpuPolicy();interrupted();mixedOneAngleWorkers();repeatedInsertsAfterHoleFills();singletonWindowExpansion();timedAlternatives();gpuFailurePolicy();gpuFastPathsWhenAvailable();
     std::cout<<"All nesting regression checks passed\n";return 0;
   } catch(const std::exception& e) {std::cerr<<e.what()<<"\n";return 1;}
 }

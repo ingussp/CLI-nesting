@@ -334,7 +334,12 @@ First/timed modes do not automatically clear the results directory.
 
 Timed/continuous search prefers, in order: fewer unplaced copies, less unused
 material in used sheets (usedSheetWasteArea), then less unused area inside occupied
-bounding rectangles (compactWasteArea). For identical parts on identical stock,
+bounding rectangles (compactWasteArea). Equal envelopes are broken by
+`placementSpreadCost`: the sum of each part's material area multiplied by its
+bounding-box centre's X+Y distance from that sheet's lower-left bounds origin.
+This fourth objective retains useful inward moves even before an outermost part
+can move; it never overrides completeness, stock waste or envelope area.
+For identical parts on identical stock,
 physical scrap area is constant; rearrangement can still improve compactness and
 remnant shape. Clearances remain unused material in the statistics. Search is
 heuristic: global optimality and further improvements are not guaranteed.
@@ -420,6 +425,8 @@ CAD exchange file, not JSON with a changed extension.
 | `gpu.batches`, `candidates`, `fallbackReason` | GPU diagnostics. Timed totals cover restarts; continuous snapshots describe the candidate strategy |
 | `usedSheetWasteArea` | Unused material in used sheets, mm squared, excluding holes and unused sheets |
 | `occupiedBoundsArea`, `compactWasteArea` | Occupied raster bounding-rectangle area and unused area within it |
+| `placementSpreadCost` | Area-weighted X+Y bounds-centre distance from the respective stock origin (mm cubed); lower breaks equal-envelope ties |
+| `pocketRelocations` | Already placed copies relocated into open concavities in the selected repair candidate |
 | `utilisation` | Legacy percentage against processed stock material; not the sole quality criterion |
 
 ## Command-line reference
@@ -701,7 +708,16 @@ into a feasible branch, while sparse searches still use the configured maximum.
 The candidate order and finite search tree remain unchanged.
 
 Incumbent repair (used by the CPU companion trials in hybrid continuous search):
-`refillBitmapLayout` compacts a copy of a validated layout, optionally releases a
+Every third repair variation first searches open concavities (convex hull minus
+outer contour) for copies already placed elsewhere on the same sheet. It uses
+inner-NFP proposals, the copy's existing orientation and up to 16 rotating allowed
+angle samples. Proposals must fit inside the pocket and pass exact stock and
+pairwise clearance checks against all other parts. Positive part spacing insets
+the pocket conservatively. Only moves decreasing the spread cost are committed;
+placing a copy inside a retained host's hull cannot enlarge the sheet envelope.
+This is a bounded heuristic and does not prove every usable pocket was found.
+
+`refillBitmapLayout` otherwise compacts a copy of a validated layout, optionally releases a
 small neighbourhood, and tries CPU refill using rotating angle shortlists plus
 the removed parts' original orientations. Callers must compare the returned
 candidate against the incumbent and discard regressions. Regression tests cover

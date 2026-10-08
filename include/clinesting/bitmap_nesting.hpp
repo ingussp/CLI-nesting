@@ -75,6 +75,8 @@ struct BitmapNestingStats {
   size_t cpuWorkersUsed{1};
   size_t candidateWorkersUsed{0};
   double occupiedBoundsArea{0.0};
+  double placementSpreadCost{0.0}; // Area-weighted distance of bounds centres from stock origin (mm^3).
+  size_t pocketRelocations{0};
   // Report one strategy's placement count and phase timings.
   struct TrialStats {
     std::string strategy;

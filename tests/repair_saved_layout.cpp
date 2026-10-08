@@ -7,7 +7,7 @@
 using namespace clinesting;
 int main(int argc,char** argv) {
  try {
-  if(argc!=4) throw std::runtime_error("Expected input.json incumbent.json output.json");
+  if(argc<4 || argc>6) throw std::runtime_error("Expected input.json incumbent.json output.json [passes] [seconds-per-pass]");
   auto request=readNestingJson(argv[1]);const auto saved=nlohmann::json::parse(std::ifstream(argv[2]));
   PlacementResult best;BitmapNestingStats bestStats;bestStats.occupiedBoundsArea=saved.at("occupiedBoundsArea");
   std::vector<int> ids;
@@ -27,10 +27,21 @@ int main(int argc,char** argv) {
    if(std::find(ids.begin(),ids.end(),*part.id)==ids.end()) best.unplaced.push_back(part);
    else best.area+=polygonMaterialArea(part);
   }
-  for(int i=0;i<160;++i) {
-   auto cfg=request.config;cfg.timeLimitSeconds=2;cfg.searchIteration=i;
+  for(const auto& layout:best.placements) {
+   const auto sheet=std::find_if(request.sheets.begin(),request.sheets.end(),[&](const auto& p){return p.id==layout.sheetid;});
+   const auto sb=getPolygonBounds(sheet->points);
+   for(const auto& placement:layout.sheetplacements) {
+    const auto part=std::find_if(request.individual.placement.begin(),request.individual.placement.end(),[&](const auto& p){return p.id==placement.id;});
+    const auto absolute=shiftPolygon(rotatePolygon(*part,placement.rotation),{placement.x,placement.y,true});
+    const auto b=getPolygonBounds(absolute.points);
+    bestStats.placementSpreadCost+=polygonMaterialArea(absolute)*(b.x+b.width/2-sb.x+b.y+b.height/2-sb.y);
+   }
+  }
+  const int passes=argc>4 ? std::stoi(argv[4]) : 160;
+  for(int i=0;i<passes;++i) {
+   auto cfg=request.config;cfg.timeLimitSeconds=argc>5 ? std::stod(argv[5]) : 2;cfg.searchIteration=i;
    BitmapNestingStats stats;auto candidate=refillBitmapLayout(request.sheets,request.individual.placement,best,cfg,&stats);
-   std::cout<<"pass="<<i<<" placed="<<request.individual.placement.size()-candidate.unplaced.size()<<" moves="<<stats.vectorMoves<<" refill="<<stats.refillPlacements<<" ms="<<stats.totalBitmapMs<<std::endl;
+   std::cout<<"pass="<<i<<" placed="<<request.individual.placement.size()-candidate.unplaced.size()<<" moves="<<stats.vectorMoves<<" pocket="<<stats.pocketRelocations<<" refill="<<stats.refillPlacements<<" bounds="<<stats.occupiedBoundsArea<<" spread="<<stats.placementSpreadCost<<" ms="<<stats.totalBitmapMs<<std::endl;
    if(improvesLayout(layoutQuality(request.sheets,candidate,stats),layoutQuality(request.sheets,best,bestStats))) {best=std::move(candidate);bestStats=stats;}
    OrchestratorRunStats out;out.placement=best;out.bitmapStats=bestStats;writeNestingJson(argv[3],request,out);
   }

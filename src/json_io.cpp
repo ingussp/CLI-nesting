@@ -350,6 +350,8 @@ void writeNestingJson(const std::filesystem::path& path,const BackgroundRequest&
   const auto quality=layoutQuality(input.sheets,r,run.bitmapStats);
   out["usedSheetWasteArea"]=quality.usedSheetWasteArea;
   out["occupiedBoundsArea"]=run.bitmapStats.occupiedBoundsArea;
+  out["placementSpreadCost"]=run.bitmapStats.placementSpreadCost;
+  out["pocketRelocations"]=run.bitmapStats.pocketRelocations;
   out["compactWasteArea"]=std::max(0.0,run.bitmapStats.occupiedBoundsArea-r.area);
   out["startedTrials"]=run.bitmapStats.startedTrials;
   out["totalStartedTrials"]=run.bitmapStats.totalStartedTrials;

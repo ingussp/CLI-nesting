@@ -68,7 +68,7 @@ PlacementResult recursiveBitmapSearch(const std::vector<Polygon>& sheets,
   counts.cpuWorkersUsed=parallel.size();
   PlacementResult best;best.unplaced=parts;
   size_t bestCount=0;
-  double bestWaste=std::numeric_limits<double>::infinity(),bestBounds=bestWaste;
+  double bestWaste=std::numeric_limits<double>::infinity(),bestBounds=bestWaste,bestSpread=bestWaste;
   struct Stock {
     Bounds bounds;
     BitmapGrid material,occupied;
@@ -117,24 +117,29 @@ PlacementResult recursiveBitmapSearch(const std::vector<Polygon>& sheets,
   double placedArea=0;
   auto publish=[&] {
     if(placedCount<bestCount) return;
-    double stockArea=0,boundsArea=0;
+    double stockArea=0,boundsArea=0,spread=0;
     for(size_t s=0;s<stocks.size();++s) if(!stocks[s].placed.empty()) {
       stockArea+=polygonMaterialArea(sheets[s]);
       std::vector<Point> points;
-      for(const auto& p:stocks[s].geometry) points.insert(points.end(),p.points.begin(),p.points.end());
+      const auto sb=getPolygonBounds(sheets[s].points);
+      for(const auto& p:stocks[s].geometry) {
+        points.insert(points.end(),p.points.begin(),p.points.end());
+        spread+=placementSpreadCost(p,sb);
+      }
       const auto bounds=getPolygonBounds(points);boundsArea+=bounds.width*bounds.height;
     }
     const double waste=stockArea-placedArea;
     if(placedCount<bestCount || (placedCount==bestCount &&
-        (waste>bestWaste+1e-8 || (std::abs(waste-bestWaste)<=1e-8 && boundsArea>=bestBounds-1e-8)))) return;
-    bestCount=placedCount;bestWaste=waste;bestBounds=boundsArea;
+        (waste>bestWaste+1e-8 || (std::abs(waste-bestWaste)<=1e-8 &&
+        (boundsArea>bestBounds+1e-8 || (std::abs(boundsArea-bestBounds)<=1e-8 && spread>=bestSpread-1e-8)))))) return;
+    bestCount=placedCount;bestWaste=waste;bestBounds=boundsArea;bestSpread=spread;
     best={};best.area=placedArea;best.totalarea=stockArea;
     for(size_t s=0;s<stocks.size();++s) if(!stocks[s].placed.empty())
       best.placements.push_back({sheets[s].source,sheets[s].id,stocks[s].placed});
     for(size_t i=0;i<parts.size();++i) if(!placed[i]) best.unplaced.push_back(parts[i]);
     best.fitness=double(best.unplaced.size());
     best.utilisation=stockArea>0 ? 100*placedArea/stockArea : 0;
-    counts.occupiedBoundsArea=boundsArea;counts.placedParts=placedCount;
+    counts.occupiedBoundsArea=boundsArea;counts.placementSpreadCost=spread;counts.placedParts=placedCount;
     counts.unplacedParts=best.unplaced.size();counts.acceptedPlacements=placedCount;
     counts.totalBitmapMs=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-started).count();
     if(onLayout) onLayout(best,counts);

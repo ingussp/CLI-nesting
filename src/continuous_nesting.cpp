@@ -21,7 +21,7 @@ LayoutQuality layoutQuality(const std::vector<Polygon>& sheets,const PlacementRe
     usedArea+=polygonMaterialArea(*sheet);
   }
   return {result.unplaced.size(),std::max(0.0,usedArea-result.area),
-          std::max(0.0,stats.occupiedBoundsArea-result.area)};
+          std::max(0.0,stats.occupiedBoundsArea-result.area),stats.placementSpreadCost};
 }
 // Compare layouts by completeness, stock waste and compactness.
 bool improvesLayout(const LayoutQuality& candidate,const LayoutQuality& incumbent) {
@@ -31,7 +31,9 @@ bool improvesLayout(const LayoutQuality& candidate,const LayoutQuality& incumben
     return a<b-tolerance ? -1 : a>b+tolerance ? 1 : 0;
   };
   const int waste=compare(candidate.usedSheetWasteArea,incumbent.usedSheetWasteArea);
-  return waste<0 || (waste==0 && compare(candidate.compactWasteArea,incumbent.compactWasteArea)<0);
+  if(waste!=0) return waste<0;
+  const int compact=compare(candidate.compactWasteArea,incumbent.compactWasteArea);
+  return compact<0 || (compact==0 && compare(candidate.placementSpreadCost,incumbent.placementSpreadCost)<0);
 }
 
 // Coordinate timed restarts or systematic continuous rounds; retain improvements.
