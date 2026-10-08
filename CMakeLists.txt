@@ -27,6 +27,7 @@ FetchContent_MakeAvailable(clipper2)
 
 add_library(clinesting
   src/bitmap_nesting.cpp
+  src/reusable_offcut.cpp
   src/continuous_nesting.cpp
   src/gpu_bitmap.cpp
   src/demo_cli.cpp
@@ -99,4 +100,10 @@ if(CLINESTING_BUILD_TESTS)
   add_executable(repair_saved_layout tests/repair_saved_layout.cpp)
   target_include_directories(repair_saved_layout PRIVATE third_party)
   target_link_libraries(repair_saved_layout PRIVATE clinesting)
+endif()
+
+if(CLINESTING_BUILD_TESTS)
+  add_executable(measure_saved_offcut tests/measure_saved_offcut.cpp)
+  target_include_directories(measure_saved_offcut PRIVATE third_party)
+  target_link_libraries(measure_saved_offcut PRIVATE clinesting)
 endif()

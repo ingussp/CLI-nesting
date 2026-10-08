@@ -1,6 +1,7 @@
 #pragma once
 
 #include "clinesting/model.hpp"
+#include "clinesting/reusable_offcut.hpp"
 
 #include <cstddef>
 #include <functional>
@@ -11,6 +12,9 @@ namespace clinesting {
 
 // Collect bitmap search counters, worker usage and timing diagnostics.
 struct BitmapNestingStats {
+  ReusableOffcut reusableOffcut;
+  size_t offcutEvaluations{0};
+  double offcutEvaluationMs{0};
   std::string simdBackend{"scalar"};
   std::string gpuDevice;
   std::string gpuFallbackReason;

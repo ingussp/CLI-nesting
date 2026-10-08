@@ -86,6 +86,7 @@ static OrchestratorRunStats optimize(BackgroundRequest request,const std::functi
     candidateWorkers=std::max(candidateWorkers,stats.candidateWorkersUsed);
   };
   std::string gpuDevice,gpuFallback;
+  size_t offcutEvaluations=0;double offcutMs=0;
   auto consider=[&](const PlacementResult& placement,const BitmapNestingStats& stats) {
     std::lock_guard lock(incumbentMutex);
     const auto quality=layoutQuality(request.sheets,placement,stats);
@@ -97,6 +98,16 @@ static OrchestratorRunStats optimize(BackgroundRequest request,const std::functi
     if(hybrid) {result.bitmapStats.continuousPortfolio=true;result.bitmapStats.cpuWorkersUsed=configuredWorkers;}
     result.timings.bitmapMs=stats.totalBitmapMs;
     result.timings.placementMs=stats.totalBitmapMs;
+    // The original search objective has already accepted this layout. Measure
+    // exactly once before publishing; never score rejected candidates or veto
+    // a selected result because of its offcut area or a late cancellation.
+    if(!timed && request.config.reusableOffcutEnabled) {
+      result.bitmapStats.reusableOffcut=measureReusableOffcut(request.sheets,
+          request.individual.placement,placement,request.config);
+      offcutMs+=result.bitmapStats.reusableOffcut.elapsedMs;++offcutEvaluations;
+      result.bitmapStats.offcutEvaluations=offcutEvaluations;
+      result.bitmapStats.offcutEvaluationMs=offcutMs;
+    }
     result.timings.totalMs=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-started).count();
     onImprovement(request,result,sequence+1);
     best=result;

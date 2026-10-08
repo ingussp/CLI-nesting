@@ -6,6 +6,8 @@
 #include "raster_scanline.hpp"
 #include "free_rectangles.hpp"
 #include "rejection_cache.hpp"
+#include "fixtures/offcut_point_touch.hpp"
+#include <set>
 #include <algorithm>
 #include <atomic>
 #include <cmath>
@@ -548,6 +550,9 @@ void continuousContactPortfolio() {
     [&](const auto&,const auto& run,size_t) {
       const auto count=parts.size()-run.placement.unplaced.size();
       require(count>=bestCount,"Hybrid search replaced its incumbent with fewer parts");bestCount=count;
+      require(run.bitmapStats.reusableOffcut.evaluated,"Continuous improvement lacks its offcut score");
+      const auto measured=measureReusableOffcut(request.sheets,parts,run.placement,cfg.reusableOffcutMinWidthMm);
+      require(std::abs(measured.area-run.bitmapStats.reusableOffcut.area)<1e-6,"Continuous improvement has a stale offcut score");
       valid(sheet,parts,run.placement,cfg);
     });
   require(trials>=2 && result.bitmapStats.continuousPortfolio,"Continuous CPU contact workers did not run");
@@ -666,6 +671,153 @@ void concavePocketAngleCoverage() {
     valid(sheet,parts,repaired,cfg);
     const auto placed=transformed(parts,repaired)[1];
     require(!hasMaterialOutsideSheet(placed,rectangle(10,12.5,9,1),cfg),"Rotated donor missed the thin pocket");
+  }
+}
+void offcutPublicationOnly() {
+  BackgroundRequest request;request.config=settings();
+  request.config.spacing=request.config.sheetSpacing=request.config.holeSpacing=0;
+  request.config.continuousRoundSeconds=1;request.config.reusableOffcutMinWidthMm=0.5;
+  request.sheets={rectangle(0,0,3,2,77)};
+  for(int i=1;i<=4;++i) {
+    auto part=rectangle(0,0,2,1,i);part.allowedAngles={0,90};
+    request.individual.placement.push_back(part);
+  }
+  std::vector<PlacementResult> baseline;
+  auto run=[&](bool enabled) {
+    request.config.reusableOffcutEnabled=enabled;size_t publications=0;
+    const auto started=std::chrono::steady_clock::now();
+    const auto result=runContinuousNesting(request,[&] {
+      return std::chrono::steady_clock::now()-started>std::chrono::seconds(5);
+    },[&](const auto&,const auto& result,size_t sequence) {
+      ++publications;const auto& stats=result.bitmapStats;
+      if(enabled) {
+        require(publications<=baseline.size(),"Offcut reporting introduced extra publications");
+        sameLayout(baseline[publications-1],result.placement);
+        require(stats.reusableOffcut.evaluated && stats.reusableOffcut.arcToleranceMm<=0.001,
+                "Published result lacks high precision offcut evaluation");
+        require(stats.offcutEvaluations==sequence,"Offcut evaluator ran on an unpublished candidate");
+      } else {
+        baseline.push_back(result.placement);
+        require(!stats.reusableOffcut.evaluated && stats.offcutEvaluations==0,"Disabled offcut reporting performed work");
+      }
+    });
+    require(result.bitmapStats.recursiveExhausted,"Offcut publication fixture failed to exhaust its search");
+    require(publications>0 && publications==baseline.size(),"Offcut reporting changed the publication sequence");
+    require(result.bitmapStats.offcutEvaluations==(enabled ? publications : 0),"Final offcut count differs from saved layouts");
+  };
+  run(false);run(true);
+}
+void offcutClearances() {
+  Config cfg;cfg.spacing=12;
+  const auto sheet=rectangle(0,0,100,100,77);
+  const std::vector<Polygon> parts={rectangle(0,0,20,100,1),rectangle(0,0,20,100,2)};
+  Placement a;a.id=1;Placement b;b.id=2;b.x=32;
+  PlacementResult layout;layout.placements.push_back({sheet.source,sheet.id,{a,b}});
+  const auto raw=measureReusableOffcut({sheet},parts,layout,5);
+  const auto reserved=measureReusableOffcut({sheet},parts,layout,cfg);
+  require(std::abs(raw.freeArea-6000)<1e-6 && std::abs(reserved.freeArea-raw.freeArea)<1e-6,"Clearances changed physical free area");
+  require(std::abs(reserved.availableArea-3600)<1e-6 && std::abs(reserved.clearanceExcludedArea-2400)<1e-6,"12 mm reserved strips were counted as reusable material");
+  require(getPolygonBounds(reserved.contour.points).x>=64-1e-6,"12 mm inter-part gap returned in recovered contour");
+  cfg.sheetSpacing=3;
+  const auto margin=measureReusableOffcut({sheet},parts,layout,cfg);
+  require(std::abs(margin.availableArea-33*94)<1e-6,"Sheet edge clearance was not excluded");
+  cfg.sheetSpacing=0;cfg.holeSpacing=7;
+  auto frame=rectangle(0,0,100,100,1);frame.children={rectangle(20,20,60,60)};
+  layout.placements[0].sheetplacements={a};
+  auto cavity=measureReusableOffcut({sheet},{frame},layout,cfg);
+  require(std::abs(cavity.availableArea-46*46)<1e-6,"Part hole did not use its independent hole clearance");
+  cfg.holeSpacing=12;b.x=40;b.y=40;
+  layout.placements[0].sheetplacements.push_back(b);
+  auto filled=measureReusableOffcut({sheet},{frame,rectangle(0,0,20,20,2)},layout,cfg);
+  require(filled.availableArea<1e-6 && filled.area==0,"Part hole erased another part's reserved spacing");
+  auto stock=sheet;stock.children={rectangle(20,20,60,60)};
+  layout.placements[0].sheetplacements={a};cfg.spacing=0;
+  const auto stockHole=measureReusableOffcut({stock},{rectangle(0,0,1,1,1)},layout,cfg);
+  require(stockHole.area>0 && !stockHole.contour.children.empty(),"Stock hole clearance removed all usable border material");
+  for(const auto& hole:stockHole.contour.children)
+    require(distance(hole,stock.children.front())>=12-0.002,"Stock cutout clearance was not excluded");
+  cfg.spacing=-1;bool rejected=false;
+  try {measureReusableOffcut({sheet},parts,layout,cfg);}catch(const std::invalid_argument&) {rejected=true;}
+  require(rejected,"Negative offcut spacing accepted");
+  BackgroundRequest request;request.sheets={sheet};request.individual.placement=parts;
+  request.config=settings();request.config.spacing=12;request.config.sheetSpacing=0;request.config.holeSpacing=0;
+  bool stop=false;size_t publications=0;
+  const auto run=runContinuousNesting(request,[&]{return stop;},[&](const auto&,const auto& result,size_t sequence) {
+    const auto& report=result.bitmapStats.reusableOffcut;
+    require(report.spacingMm==12 && report.availableArea<report.freeArea,"Publication failed to pass clearance settings to offcut evaluator");
+    require(result.bitmapStats.offcutEvaluations==sequence,"Spacing check evaluated unpublished candidates");
+    ++publications;stop=true;
+  });
+  require(publications==1 && run.bitmapStats.offcutEvaluations==1,"Spacing publication did not stop cleanly");
+}
+void reusableOffcutObjective() {
+  auto cfg=settings();cfg.spacing=cfg.sheetSpacing=cfg.holeSpacing=0;
+  const auto sheet=rectangle(10,20,100,100,77);
+  const auto divider=rectangle(0,0,2,100,1);
+  Placement p;p.id=1;p.x=10;p.y=20;
+  PlacementResult edge;edge.area=200;edge.totalarea=10000;edge.placements.push_back({sheet.source,sheet.id,{p}});
+  auto middle=edge;middle.placements[0].sheetplacements[0].x=59;
+  const auto a=measureReusableOffcut({sheet},{divider},edge,5);
+  const auto b=measureReusableOffcut({sheet},{divider},middle,5);
+  require(a.evaluated && b.evaluated && std::abs(a.freeArea-9800)<1e-6 && std::abs(b.freeArea-a.freeArea)<1e-6,"Offcut changed total free material");
+  require(a.area>9700 && b.area>4800 && b.area<4901,"Offcut failed to distinguish one large piece from two fragments");
+  const double exactRoundedArea=9800-(4-std::numbers::pi)*2.5*2.5;
+  require(std::abs(a.area-exactRoundedArea)<0.05,"High precision round offset exceeds analytic area tolerance");
+  require(!hasMaterialOutsideSheet(a.contour,sheet,cfg),"Offcut contour lies outside sheet");
+  require(!hasMaterialOverlap(a.contour,shiftPolygon(divider,{10,20,true}),cfg),"Offcut contour overlaps a part");
+  require(improvesLayout({0,0,1,0},{0,0,9999,0}),"Original compactness objective changed");
+  auto dumbbell=rectangle(0,0,50,20,77);
+  dumbbell.points={{0,0,true},{20,0,true},{20,9,true},{30,9,true},{30,0,true},{50,0,true},
+    {50,20,true},{30,20,true},{30,11,true},{20,11,true},{20,20,true},{0,20,true}};
+  auto dot=rectangle(0,0,1,1,1);p.x=1;p.y=1;
+  PlacementResult layout;layout.placements.push_back({dumbbell.source,dumbbell.id,{p}});
+  auto narrow=measureReusableOffcut({dumbbell},{dot},layout,5);
+  require(narrow.components==2 && narrow.area>380 && narrow.area<420,"Narrow bridge incorrectly joined two reusable pieces");
+  const auto wide=measureReusableOffcut({dumbbell},{dot},layout,1);
+  require(wide.area>780,"Width threshold did not restore the connected piece");
+  auto ring=rectangle(0,0,50,50,77);ring.children={rectangle(15,15,20,20)};
+  layout.placements[0].sheetid=ring.id;
+  auto holed=measureReusableOffcut({ring},{dot},layout,5);
+  require(!hasMaterialOutsideSheet(holed.contour,ring,cfg) && !holed.contour.children.empty(),"Stock cutout was filled in offcut contour");
+  auto solid=rectangle(0,0,50,50,77);
+  auto frame=rectangle(0,0,48,48,1);frame.children={rectangle(4,4,40,40)};
+  const auto inside=measureReusableOffcut({solid},{frame},layout,5);
+  require(inside.area>1590 && inside.area<1601,"Reusable material inside a part hole was lost");
+  require(!hasMaterialOverlap(inside.contour,shiftPolygon(frame,{1,1,true}),cfg),"Recovered hole offcut overlaps its enclosing part");
+  auto secondSheet=rectangle(0,0,200,100,88);
+  auto secondPart=rectangle(0,0,2,100,2);
+  auto twoSheets=edge;Placement secondPlacement;secondPlacement.id=2;
+  twoSheets.placements.push_back({secondSheet.source,secondSheet.id,{secondPlacement}});
+  const auto largest=measureReusableOffcut({sheet,secondSheet},{divider,secondPart},twoSheets,5);
+  require(largest.sheetId==88 && largest.area>19700 && largest.area<19801 && std::abs(largest.freeArea-29600)<1e-6,"Multiple sheets combined disconnected offcuts or lost free area");
+  require(!measureReusableOffcut({sheet},{divider},edge,5,[]{return true;}).evaluated,"Cancelled offcut evaluation reported a valid score");
+  auto noStock=measureReusableOffcut({sheet},{divider},{},5);
+  require(noStock.evaluated && noStock.area==0,"Untouched stock was counted as a reusable offcut");
+  const auto parsed=parseNestingJson(R"({"config":{"reusableOffcut":{"enabled":false,"minWidthMm":7}},"sheets":[{"width":10,"height":10}],"parts":[{"points":[[0,0],[1,0],[1,1],[0,1]]}]})");
+  require(!parsed.config.reusableOffcutEnabled && parsed.config.reusableOffcutMinWidthMm==7,"Offcut settings were not parsed");
+  bool rejected=false;try {measureReusableOffcut({sheet},{divider},edge,0);}catch(const std::invalid_argument&) {rejected=true;}
+  require(rejected,"Zero offcut width accepted");
+  const auto touching=parseNestingJson(offcutPointTouchFixture);
+  PlacementResult placedTouching;SheetPlacement placedSheet;placedSheet.sheetid=touching.sheets.front().id;
+  for(const auto& part:touching.individual.placement) {Placement p;p.id=part.id;placedSheet.sheetplacements.push_back(p);}
+  placedTouching.placements.push_back(placedSheet);
+  const auto separated=measureReusableOffcut(touching.sheets,touching.individual.placement,placedTouching,5);
+  require(separated.evaluated && separated.area>172000,"Point-touch fixture lost its main offcut");
+  auto simpleRing=[](const Polygon& polygon) {
+    std::set<std::pair<double,double>> vertices;
+    for(const auto& p:polygon.points) require(vertices.emplace(p.x,p.y).second,"Offcut has a self-touching contour");
+  };
+  simpleRing(separated.contour);for(const auto& hole:separated.contour.children) simpleRing(hole);
+  for(const auto& part:touching.individual.placement) {
+    using namespace Clipper2Lib;
+    auto overlap=Intersect(Paths64{outerPathToClipperCoordinates(separated.contour,cfg)},
+        Paths64{outerPathToClipperCoordinates(part,cfg)},FillRule::NonZero);
+    auto holes=childPathsToClipperCoordinates(separated.contour,cfg);
+    const auto partHoles=childPathsToClipperCoordinates(part,cfg);holes.insert(holes.end(),partHoles.begin(),partHoles.end());
+    overlap=Difference(overlap,holes,FillRule::NonZero);
+    // Bound numerical boundary slivers from the evaluator's 0.000001 mm grid.
+    require(std::abs(Area(overlap))/(cfg.clipperScale*cfg.clipperScale)<0.0001,
+            "Splitting a point touch crossed a part boundary beyond coordinate precision");
   }
 }
 void continuousDenseAnglesRetained() {
@@ -841,6 +993,7 @@ void recursiveTreeAndGpuParity() {
 }
 int main(int argc,char** argv) {
   try {
+    if(argc==2 && std::string(argv[1])=="--offcut-only") { offcutClearances();offcutPublicationOnly();reusableOffcutObjective();std::cout<<"Offcut regressions passed\n";return 0; }
     if(argc==2 && std::string(argv[1])=="--dense-rotations-only") {
       continuousDenseAnglesRetained();lazyGpuMaskUploads();refillSeedRasterRoundoff();
       std::cout<<"Dense rotation regressions passed\n";return 0;
@@ -848,7 +1001,7 @@ int main(int argc,char** argv) {
     if(argc==2 && std::string(argv[1])=="--raster-boundary-only") {
       refillSeedRasterRoundoff();std::cout<<"Raster boundary regression passed\n";return 0;
     }
-    continuousDenseAnglesRetained();lazyGpuMaskUploads();refillSeedRasterRoundoff();concavePocketAngleCoverage();concavePocketRelocation();interlockingGroups();continuousContactPortfolio();incumbentRefill();residentGpuOccupancies();parallelRecursivePartitions();recursiveDuplicateSkipPruning();recursiveTreeAndGpuParity();restartAnchorAngles();timedSeedLeavesPortfolioBudget();sparseRejectionBudgetAndFailureEpochs();gpuOrderedBatchParity();stockObstaclesInBottomLeftSearch();fractionalHoleAndSheetMargins();modeSearchAndRefinement();bottomLeftSearch();scanlines();freeRectangleProof();mixedPanelsAndMultipleSheets();duplicateContours();holesFirst();rotatedAndMultipleHoles();concavePocket();rowsAndGpuPolicy();interrupted();mixedOneAngleWorkers();repeatedInsertsAfterHoleFills();singletonWindowExpansion();timedAlternatives();gpuFailurePolicy();gpuFastPathsWhenAvailable();
+    offcutClearances();offcutPublicationOnly();reusableOffcutObjective();continuousDenseAnglesRetained();lazyGpuMaskUploads();refillSeedRasterRoundoff();concavePocketAngleCoverage();concavePocketRelocation();interlockingGroups();continuousContactPortfolio();incumbentRefill();residentGpuOccupancies();parallelRecursivePartitions();recursiveDuplicateSkipPruning();recursiveTreeAndGpuParity();restartAnchorAngles();timedSeedLeavesPortfolioBudget();sparseRejectionBudgetAndFailureEpochs();gpuOrderedBatchParity();stockObstaclesInBottomLeftSearch();fractionalHoleAndSheetMargins();modeSearchAndRefinement();bottomLeftSearch();scanlines();freeRectangleProof();mixedPanelsAndMultipleSheets();duplicateContours();holesFirst();rotatedAndMultipleHoles();concavePocket();rowsAndGpuPolicy();interrupted();mixedOneAngleWorkers();repeatedInsertsAfterHoleFills();singletonWindowExpansion();timedAlternatives();gpuFailurePolicy();gpuFastPathsWhenAvailable();
     std::cout<<"All nesting regression checks passed\n";return 0;
   } catch(const std::exception& e) {std::cerr<<e.what()<<"\n";return 1;}
 }
