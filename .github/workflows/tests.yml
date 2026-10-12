@@ -1,0 +1,115 @@
+name: Cross-platform builds and regression tests
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  regression:
+    name: ${{ matrix.platform }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: Windows x64
+            runner: windows-2022
+            preset: windows-release
+            build-dir: build-release
+            binary: build-release/Release/clinesting.exe
+            package: clinesting-windows-x86_64
+          - platform: Linux x64
+            runner: ubuntu-22.04
+            preset: linux-release
+            build-dir: build-linux-release
+            binary: build-linux-release/clinesting
+            package: clinesting-linux-x86_64
+          - platform: Linux ARM64
+            runner: ubuntu-22.04-arm
+            preset: linux-release
+            build-dir: build-linux-release
+            binary: build-linux-release/clinesting
+            package: clinesting-linux-aarch64
+          - platform: macOS Apple Silicon (Universal 2)
+            runner: macos-15
+            preset: macos-universal-release
+            build-dir: build-macos-universal-release
+            binary: build-macos-universal-release/clinesting
+            package: clinesting-macos-universal2
+          - platform: macOS Intel (Universal 2)
+            runner: macos-15-intel
+            preset: macos-universal-release
+            build-dir: build-macos-universal-release
+            binary: build-macos-universal-release/clinesting
+            package: ''
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install Linux build tools
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y cmake ninja-build g++
+      - name: Select Xcode 16.4 and install macOS build tools
+        if: runner.os == 'macOS'
+        run: |
+          sudo xcode-select --switch /Applications/Xcode_16.4.app/Contents/Developer
+          brew install cmake ninja
+      - name: Configure
+        env:
+          BUILD_PRESET: ${{ matrix.preset }}
+        run: cmake --preset "$BUILD_PRESET" -DCLINESTING_BUILD_TESTS=ON
+      - name: Build
+        env:
+          BUILD_PRESET: ${{ matrix.preset }}
+        run: cmake --build --preset "$BUILD_PRESET" --parallel 2
+      - name: Test
+        env:
+          BUILD_PRESET: ${{ matrix.preset }}
+        run: ctest --preset "$BUILD_PRESET"
+      - name: Verify Linux ARM64 cross-compilation from x64
+        if: matrix.platform == 'Linux x64'
+        run: |
+          sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
+          cmake --preset linux-arm64-cross-release
+          cmake --build --preset linux-arm64-cross-release --target clinesting_cli --parallel 2
+          file build-linux-arm64-cross-release/clinesting
+      - name: Verify Universal 2 architectures
+        if: runner.os == 'macOS'
+        env:
+          CLI_BINARY: ${{ matrix.binary }}
+        run: |
+          lipo "$CLI_BINARY" -verify_arch arm64 x86_64
+          lipo -info "$CLI_BINARY"
+          otool -L "$CLI_BINARY"
+      - name: Package executable, examples and dependency licenses
+        if: matrix.package != ''
+        env:
+          CLI_BINARY: ${{ matrix.binary }}
+          BUILD_DIR: ${{ matrix.build-dir }}
+          PACKAGE_NAME: ${{ matrix.package }}
+        run: |
+          mkdir -p "artifacts/$PACKAGE_NAME/licenses"
+          cp "$CLI_BINARY" "artifacts/$PACKAGE_NAME/"
+          cp README.md JSON_INPUT.md "artifacts/$PACKAGE_NAME/"
+          cp -R examples "artifacts/$PACKAGE_NAME/"
+          cp third_party/nlohmann/LICENSE.MIT "artifacts/$PACKAGE_NAME/licenses/nlohmann-json.MIT"
+          cp third_party/opencl/LICENSE "artifacts/$PACKAGE_NAME/licenses/OpenCL.txt"
+          cp "$BUILD_DIR/_deps/clipper2-src/LICENSE" "artifacts/$PACKAGE_NAME/licenses/Clipper2.txt"
+          tar -czf "artifacts/$PACKAGE_NAME.tar.gz" -C artifacts "$PACKAGE_NAME"
+      - uses: actions/upload-artifact@v4
+        if: matrix.package != ''
+        with:
+          name: ${{ matrix.package }}
+          path: artifacts/${{ matrix.package }}.tar.gz
+          if-no-files-found: error

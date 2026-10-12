@@ -1,0 +1,122 @@
+#pragma once
+
+#include "clinesting/model.hpp"
+#include "clinesting/reusable_offcut.hpp"
+
+#include <cstddef>
+#include <functional>
+#include <string>
+#include <vector>
+
+namespace clinesting {
+
+// Collect bitmap search counters, worker usage and timing diagnostics.
+struct BitmapNestingStats {
+  ReusableOffcut reusableOffcut;
+  size_t offcutEvaluations{0};
+  double offcutEvaluationMs{0};
+  std::string simdBackend{"scalar"};
+  std::string gpuDevice;
+  std::string gpuFallbackReason;
+  size_t gpuCandidates{0};
+  size_t gpuBatches{0};
+  size_t recursiveNodes{0},recursiveBacktracks{0},recursiveMaxDepth{0};
+  size_t recursiveDuplicateSkips{0};
+  bool recursiveExhausted{false};
+  bool continuousPortfolio{false};
+  size_t contactTrials{0},groupTrials{0},localRepairTrials{0},maxPatternGroupSize{0};
+  size_t maxInterlockingCapacity{0}; // Validated contour-fitting lattice capacity.
+  size_t vectorMoves{0},vectorChecks{0},searchIterations{0};
+  double vectorRefinementMs{0};
+  bool vectorRefinementCompleted{false};
+  size_t cachedMaskCount{0};
+  size_t acceptedPlacements{0};
+  size_t processedParts{0};
+  size_t placedParts{0};
+  size_t unplacedParts{0};
+  size_t candidatesExamined{0};
+  size_t boundaryRejects{0};
+  size_t bitmapCollisions{0};
+  size_t vectorValidationRejects{0};
+  double totalBitmapMs{0.0};
+  // Store elapsed time for each bitmap search phase.
+  struct PhaseTimings {
+    double preparationMs{0}, proposalsMs{0}, searchMs{0}, refinementMs{0}, gpuMs{0};
+    // Accumulate phase timings from another search result.
+    PhaseTimings& operator+=(const PhaseTimings& b) {
+      preparationMs+=b.preparationMs; proposalsMs+=b.proposalsMs;
+      searchMs+=b.searchMs; refinementMs+=b.refinementMs; gpuMs+=b.gpuMs;
+      return *this;
+    }
+  } phases;
+  // Report the outcome and search effort for one processed copy.
+  struct PartStats {
+    size_t processedPart{0};
+    bool placed{false};
+    size_t placedParts{0};
+    size_t unplacedParts{0};
+    double elapsedMs{0.0};
+    size_t candidatesExamined{0};
+    size_t boundaryRejects{0};
+    size_t bitmapCollisions{0};
+    size_t vectorValidationRejects{0};
+  };
+  std::vector<PartStats> perPart;
+  size_t neighbourGeometryChecks{0};
+  size_t searchWindowExpansions{0};
+  size_t fineFallbacks{0};
+  size_t exhaustedShapeSkips{0};
+  size_t failedSearchSkips{0};
+  size_t rejectionCachePeakBytes{0};
+  size_t totalStartedTrials{0};
+  size_t rejectedPositionSkips{0};
+  size_t patternPlacements{0};
+  size_t holePlacements{0};
+  size_t refillPlacements{0},refillPasses{0};
+  size_t completedTrials{1};
+  size_t workersUsed{1};
+  size_t proposalWorkersPerTrial{1};
+  size_t cpuWorkersUsed{1};
+  size_t candidateWorkersUsed{0};
+  double occupiedBoundsArea{0.0};
+  double placementSpreadCost{0.0}; // Area-weighted distance of bounds centres from stock origin (mm^3).
+  size_t pocketRelocations{0};
+  // Report one strategy's placement count and phase timings.
+  struct TrialStats {
+    std::string strategy;
+    size_t placed{0};
+    size_t patternPlacements{0};
+    double elapsedMs{0.0};
+    PhaseTimings phases;
+    bool completed{true};
+  };
+  std::vector<TrialStats> trials;
+  size_t selectedTrial{0};
+  bool timeLimitReached{false};
+  bool cancelled{false};
+  size_t startedTrials{0};
+};
+
+using BitmapPartProgressCallback = std::function<void(const BitmapNestingStats::PartStats&, size_t totalParts)>;
+// Serialized callback from search workers, after each finished/interrupted strategy.
+using BitmapLayoutCallback = std::function<void(const PlacementResult&, const BitmapNestingStats&)>;
+
+// Run bitmap strategies and retain the best validated layout.
+PlacementResult placePartsBitmap(const std::vector<Polygon>& sheets,
+                                 const std::vector<Polygon>& parts,
+                                 const Config& config,
+                                 BitmapNestingStats* stats = nullptr,
+                                 const BitmapPartProgressCallback& onPartProgress = {},
+                                 const BitmapLayoutCallback& onLayout = {});
+
+// CPU compaction/neighbourhood repair used by continuous companion trials.
+// Returns a candidate that may be worse; caller must retain the better layout.
+// Input placements must refer to unique part/sheet IDs from this job.
+PlacementResult refillBitmapLayout(const std::vector<Polygon>& sheets,
+    const std::vector<Polygon>& parts,const PlacementResult& incumbent,
+    const Config& config,BitmapNestingStats* stats=nullptr);
+
+// Report whether this build and CPU can use AVX2 bitmap operations.
+bool bitmapAvx2Supported();
+
+}  // namespace clinesting
