@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(clinesting VERSION 1 LANGUAGES CXX)
+project(clinesting VERSION 1.01 LANGUAGES CXX)
 
 option(CLINESTING_STATIC_RUNTIME "Use the static MSVC runtime for a standalone executable" ON)
 if(MSVC AND CLINESTING_STATIC_RUNTIME)
