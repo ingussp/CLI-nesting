@@ -336,7 +336,9 @@ void writeNestingJson(const std::filesystem::path& path,const BackgroundRequest&
   if(!input.createdAt.empty()) out["created_at"]=input.createdAt;
   out["timeLimitSeconds"]=input.config.timeLimitSeconds;
   out["timeLimitReached"]=run.bitmapStats.timeLimitReached;
-  out["stopReason"]=run.bitmapStats.cancelled ? "user_stop" : run.bitmapStats.timeLimitReached ? "time_limit" :
+  out["placementInProgress"]=run.bitmapStats.layoutInProgress;
+  out["gpuOccupancy"]={{"uploadBytes",run.bitmapStats.gpuOccupancyUploadBytes},{"deviceUpdates",run.bitmapStats.gpuOccupancyUpdates}};
+  out["stopReason"]=run.bitmapStats.cancelled ? "user_stop" : run.bitmapStats.timeLimitReached ? "time_limit" : run.bitmapStats.layoutInProgress ? "in_progress" :
     input.config.mode==SearchMode::Continuous && !run.bitmapStats.recursiveExhausted ? "searching" : "completed";
   out["continuous"]=input.config.continuous;
   out["mode"]=input.config.mode==SearchMode::First ? "first" : "continuous";

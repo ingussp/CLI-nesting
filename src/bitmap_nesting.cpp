@@ -108,6 +108,14 @@ class SpatialIndex {
   void insert(const Bounds& b, size_t id) {
     visit(b, [&](uint64_t key) { cells_[key].push_back(id); });
   }
+  // Remove a backtracked entry before its index is reused by another branch.
+  void erase(const Bounds& b,size_t id) {
+    visit(b,[&](uint64_t key) {
+      auto it=cells_.find(key);if(it==cells_.end()) return;
+      auto& ids=it->second;ids.erase(std::remove(ids.begin(),ids.end(),id),ids.end());
+      if(ids.empty()) cells_.erase(it);
+    });
+  }
   // Collect unique nearby polygon indices intersecting a query rectangle.
   std::vector<size_t> query(const Bounds& b) const {
     std::vector<size_t> ids;
@@ -881,7 +889,8 @@ PlacementResult placePartsBitmapOnSingleSheet(const Polygon& sheet,
                                               bool useAvx2,
                                               BitmapNestingStats* stats,
                                               const BitmapPartProgressCallback& onPartProgress,
-                                              const std::vector<std::pair<Placement,Polygon>>& seeds = {}) {
+                                              const std::vector<std::pair<Placement,Polygon>>& seeds = {},
+                                              const BitmapLayoutCallback& onSnapshot = {}) {
   PlacementResult out;
   out.totalarea = polygonMaterialArea(sheet);
 
@@ -951,8 +960,10 @@ PlacementResult placePartsBitmapOnSingleSheet(const Polygon& sheet,
     gpu.reset();
   };
   std::string gpuMaskIdentity;
+  std::vector<const RasterMask*> uploadedGpuMasks;
   size_t gpuOccupancyVersion=std::numeric_limits<size_t>::max();
   const auto bitmapStart = std::chrono::steady_clock::now();
+  auto lastSnapshot=bitmapStart;
   localStats.phases.preparationMs=std::chrono::duration<double,std::milli>(bitmapStart-preparationStart).count();
 
   // Refinement moves polygons off the old raster. Rebuild occupancy on the
@@ -1098,9 +1109,11 @@ PlacementResult placePartsBitmapOnSingleSheet(const Polygon& sheet,
         }
         gpu->setMasks(masks,words);
         gpuMaskIdentity=searchIdentity;
+        uploadedGpuMasks.assign(rotationMasks.begin(),rotationMasks.end());
       }
       if(gpuOccupancyVersion!=placedCount) {
         gpu->setOccupancy(occupancy.bits);
+        localStats.gpuOccupancyUploadBytes+=occupancy.bits.size()*sizeof(uint64_t);
         gpuOccupancyVersion=placedCount;
       }
     };
@@ -1688,6 +1701,14 @@ PlacementResult placePartsBitmapOnSingleSheet(const Polygon& sheet,
     if(!deadline.expired()) {
       pixels.ensure(*acceptedMask,false);
       applyMask(occupancy, *acceptedMask, acceptedX, acceptedY, useAvx2);
+      if(gpuAvailable && gpu && gpuMaskIdentity==searchIdentity && gpuOccupancyVersion==placedCount) {
+        const auto rotation=std::find(uploadedGpuMasks.begin(),uploadedGpuMasks.end(),acceptedMask);
+        if(rotation!=uploadedGpuMasks.end()) try {
+          PhaseTimer timer{localStats.phases.gpuMs};
+          gpu->toggleMask(uint32_t(rotation-uploadedGpuMasks.begin()),acceptedX,acceptedY);
+          gpuOccupancyVersion=placedCount+1;++localStats.gpuOccupancyUpdates;
+        } catch(const std::exception& e) {gpuFailed(e);}
+      }
     }
     placements.push_back(*acceptedPlacement);
     occupyProposalSpace(acceptedX,acceptedY,acceptedMask->widthPx,acceptedMask->heightPx);
@@ -1752,6 +1773,23 @@ PlacementResult placePartsBitmapOnSingleSheet(const Polygon& sheet,
     if (onPartProgress) {
       onPartProgress(partStats, totalParts);
     }
+    const auto now=std::chrono::steady_clock::now();
+    if(onSnapshot && partIndex+1<parts.size() && config.layoutSnapshotSeconds>0 &&
+       std::chrono::duration<double>(now-lastSnapshot).count()>=config.layoutSnapshotSeconds) {
+      auto snapshot=out;
+      snapshot.placements.push_back({sheet.source,sheet.id,placements});
+      snapshot.unplaced.insert(snapshot.unplaced.end(),parts.begin()+partIndex+1,parts.end());
+      snapshot.fitness=double(snapshot.unplaced.size());
+      snapshot.utilisation=snapshot.totalarea>0 ? 100*snapshot.area/snapshot.totalarea : 0;
+      auto counters=localStats;
+      counters.layoutInProgress=true;counters.completedTrials=0;
+      counters.unplacedParts=snapshot.unplaced.size();
+      counters.occupiedBoundsArea=double(usedWidth)*usedHeight*config.bitmapResolutionMm*config.bitmapResolutionMm;
+      counters.placementSpreadCost=0;
+      for(const auto& p:placedAbsolute) counters.placementSpreadCost+=placementSpreadCost(p,sheetBounds);
+      counters.totalBitmapMs=std::chrono::duration<double,std::milli>(now-bitmapStart).count();
+      onSnapshot(snapshot,counters);lastSnapshot=now;
+    }
   }
 
   localStats.cachedMaskCount = maskCache.size();
@@ -1783,13 +1821,13 @@ PlacementResult refillBitmapLayout(const std::vector<Polygon>& sheets,
   const auto started=std::chrono::steady_clock::now();
   const SearchDeadline deadline(config.timeLimitSeconds,config.stopRequested);
   auto result=incumbent;BitmapNestingStats counts;
-  auto cfg=config;cfg.gpuEnabled=false;cfg.threads=1;cfg.bitmapPatternTrial=false;
+  auto cfg=config;cfg.gpuEnabled=config.bitmapFillOnly && config.gpuEnabled;cfg.threads=1;cfg.bitmapPatternTrial=false;
   cfg.bitmapBottomLeft=true;cfg.mode=SearchMode::First;
   // On later passes release a small spatial neighbourhood, including early
   // placements that depth-first backtracking may not revisit for hours.
-  const bool pocketPass=cfg.searchIteration%3==0;
+  const bool pocketPass=!cfg.bitmapFillOnly && cfg.searchIteration%3==0;
   if(pocketPass) relocateIntoConcavePockets(sheets,parts,result,cfg,deadline,counts);
-  if(!pocketPass && cfg.searchIteration>0 && !result.placements.empty()) {
+  if(!cfg.bitmapFillOnly && !pocketPass && cfg.searchIteration>0 && !result.placements.empty()) {
     auto& layout=result.placements[(cfg.searchIteration-1)%result.placements.size()];
     if(!layout.sheetplacements.empty()) {
       const auto anchor=layout.sheetplacements[(cfg.searchIteration-1)%layout.sheetplacements.size()];
@@ -1812,7 +1850,7 @@ PlacementResult refillBitmapLayout(const std::vector<Polygon>& sheets,
       layout.sheetplacements=std::move(kept);
     }
   }
-  if(!counts.pocketRelocations) refineVectors(sheets,parts,result,cfg,deadline,counts);
+  if(!cfg.bitmapFillOnly && !counts.pocketRelocations) refineVectors(sheets,parts,result,cfg,deadline,counts);
   ParallelLoop parallel(1);
   detail::RejectionCacheBudget rejectionBudget(16*1024*1024);
   std::unique_ptr<GpuBitmap> gpu;
@@ -1845,6 +1883,9 @@ PlacementResult refillBitmapLayout(const std::vector<Polygon>& sheets,
     BitmapNestingStats fillStats;
     auto filled=placePartsBitmapOnSingleSheet(sheet,remaining,cfg,parallel,rejectionBudget,gpu,deadline,false,&fillStats,{},seeds);
     counts.vectorChecks+=fillStats.vectorChecks;counts.candidatesExamined+=fillStats.candidatesExamined;
+    counts.gpuBatches+=fillStats.gpuBatches;counts.gpuCandidates+=fillStats.gpuCandidates;
+    counts.gpuOccupancyUploadBytes+=fillStats.gpuOccupancyUploadBytes;counts.gpuOccupancyUpdates+=fillStats.gpuOccupancyUpdates;
+    counts.gpuDevice=fillStats.gpuDevice;counts.gpuFallbackReason=fillStats.gpuFallbackReason;
     if(filled.placements.empty() || filled.placements.front().sheetplacements.size()<=seeds.size()) continue;
     counts.refillPlacements+=filled.placements.front().sheetplacements.size()-seeds.size();++counts.refillPasses;
     layout->sheetplacements=std::move(filled.placements.front().sheetplacements);
@@ -1993,7 +2034,21 @@ PlacementResult placePartsBitmap(const std::vector<Polygon>& sheets,
           if (remaining.empty()) break;
           if(deadline.expired()) { trial.stats.timeLimitReached=true; break; }
           BitmapNestingStats s;
-          auto r=placePartsBitmapOnSingleSheet(sheet,remaining,cfg,parallel,rejectionBudget,gpu,deadline,useAvx2,&s,{});
+          auto progress=[&](const PlacementResult& partial,const BitmapNestingStats& counters) {
+            if(!onLayout) return;
+            auto snapshot=trial.result;
+            snapshot.area+=partial.area;snapshot.totalarea+=partial.totalarea;
+            snapshot.placements.insert(snapshot.placements.end(),partial.placements.begin(),partial.placements.end());
+            snapshot.unplaced=partial.unplaced;snapshot.fitness=double(snapshot.unplaced.size());
+            snapshot.utilisation=snapshot.totalarea>0 ? 100*snapshot.area/snapshot.totalarea : 0;
+            auto data=counters;data.occupiedBoundsArea+=trial.stats.occupiedBoundsArea;
+            data.placementSpreadCost+=trial.stats.placementSpreadCost;
+            data.placedParts=parts.size()-snapshot.unplaced.size();data.unplacedParts=snapshot.unplaced.size();
+            data.cpuWorkersUsed=workerCount*helpersPerTrial;data.proposalWorkersPerTrial=helpersPerTrial;
+            data.gpuCandidates+=trial.stats.gpuCandidates;data.gpuBatches+=trial.stats.gpuBatches;
+            std::lock_guard lock(layoutMutex);onLayout(snapshot,data);
+          };
+          auto r=placePartsBitmapOnSingleSheet(sheet,remaining,cfg,parallel,rejectionBudget,gpu,deadline,useAvx2,&s,{}, {},progress);
           // Finish each sheet before consuming fresh stock. Vector compaction
           // can open a whole new row; rebuild and refill until no copy is added.
           // Every successful pass reduces the finite remaining-part count.
@@ -2024,6 +2079,7 @@ PlacementResult placePartsBitmap(const std::vector<Polygon>& sheets,
             if(!fillStats.gpuFallbackReason.empty()) s.gpuFallbackReason=fillStats.gpuFallbackReason;
             s.fineFallbacks+=fillStats.fineFallbacks;
             s.gpuCandidates+=fillStats.gpuCandidates;s.gpuBatches+=fillStats.gpuBatches;
+            s.gpuOccupancyUploadBytes+=fillStats.gpuOccupancyUploadBytes;s.gpuOccupancyUpdates+=fillStats.gpuOccupancyUpdates;
             s.candidateWorkersUsed=std::max(s.candidateWorkersUsed,fillStats.candidateWorkersUsed);
             // An interrupted rebuild may contain only a prefix of the seeds.
             const size_t filledCount=filled.placements.empty()?0:filled.placements.front().sheetplacements.size();
@@ -2043,6 +2099,7 @@ PlacementResult placePartsBitmap(const std::vector<Polygon>& sheets,
           if(!s.gpuFallbackReason.empty()) t.gpuFallbackReason=s.gpuFallbackReason;
           t.gpuCandidates+=s.gpuCandidates;
           t.gpuBatches+=s.gpuBatches;
+          t.gpuOccupancyUploadBytes+=s.gpuOccupancyUploadBytes;t.gpuOccupancyUpdates+=s.gpuOccupancyUpdates;
           t.cachedMaskCount+=s.cachedMaskCount;
           t.phases+=s.phases;
           t.acceptedPlacements+=s.acceptedPlacements;

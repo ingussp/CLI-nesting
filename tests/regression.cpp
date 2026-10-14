@@ -6,6 +6,8 @@
 #include "raster_scanline.hpp"
 #include "free_rectangles.hpp"
 #include "rejection_cache.hpp"
+#include "latest_result_publisher.hpp"
+#include <future>
 #include "fixtures/offcut_point_touch.hpp"
 #include <set>
 #include <algorithm>
@@ -492,8 +494,8 @@ void continuousDeadlineLifecycle() {
   request.config.timeLimitSeconds=1e-12;publications=0;
   const auto immediate=runContinuousNesting(request,[]{return false;},[&](const auto&,const auto&,size_t){++publications;});
   require(publications==1 && immediate.bitmapStats.timeLimitReached,"Immediate deadline lost the baseline result");
-  request.config.timeLimitSeconds=10;bool stop=false;
-  const auto manual=runContinuousNesting(request,[&]{return stop;},[&](const auto&,const auto&,size_t){stop=true;});
+  request.config.timeLimitSeconds=10;std::atomic<bool> stop{false};
+  const auto manual=runContinuousNesting(request,[&]{return stop.load();},[&](const auto&,const auto&,size_t){stop=true;});
   require(manual.bitmapStats.cancelled && !manual.bitmapStats.timeLimitReached,"Manual cancellation must precede a future deadline");
   for(double invalid:{-1.0,86401.0,std::numeric_limits<double>::infinity()}) {
     request.config.timeLimitSeconds=invalid;bool rejected=false;
@@ -697,8 +699,9 @@ void offcutPublicationOnly() {
     },[&](const auto&,const auto& result,size_t sequence) {
       ++publications;const auto& stats=result.bitmapStats;
       if(enabled) {
-        require(publications<=baseline.size(),"Offcut reporting introduced extra publications");
-        sameLayout(baseline[publications-1],result.placement);
+        const auto measured=measureReusableOffcut(request.sheets,request.individual.placement,result.placement,
+                                                 request.config.reusableOffcutMinWidthMm);
+        require(std::abs(measured.area-stats.reusableOffcut.area)<1e-6,"Offcut belongs to a different publication");
         require(stats.reusableOffcut.evaluated && stats.reusableOffcut.arcToleranceMm<=0.001,
                 "Published result lacks high precision offcut evaluation");
         require(stats.offcutEvaluations==sequence,"Offcut evaluator ran on an unpublished candidate");
@@ -708,7 +711,8 @@ void offcutPublicationOnly() {
       }
     });
     require(result.bitmapStats.recursiveExhausted,"Offcut publication fixture failed to exhaust its search");
-    require(publications>0 && publications==baseline.size(),"Offcut reporting changed the publication sequence");
+    require(publications>0,"Offcut reporting lost all publications");
+    if(enabled) sameLayout(baseline.back(),result.placement);
     require(result.bitmapStats.offcutEvaluations==(enabled ? publications : 0),"Final offcut count differs from saved layouts");
   };
   run(false);run(true);
@@ -747,8 +751,8 @@ void offcutClearances() {
   require(rejected,"Negative offcut spacing accepted");
   BackgroundRequest request;request.sheets={sheet};request.individual.placement=parts;
   request.config=settings();request.config.spacing=12;request.config.sheetSpacing=0;request.config.holeSpacing=0;
-  bool stop=false;size_t publications=0;
-  const auto run=runContinuousNesting(request,[&]{return stop;},[&](const auto&,const auto& result,size_t sequence) {
+  std::atomic<bool> stop{false};size_t publications=0;
+  const auto run=runContinuousNesting(request,[&]{return stop.load();},[&](const auto&,const auto& result,size_t sequence) {
     const auto& report=result.bitmapStats.reusableOffcut;
     require(report.spacingMm==12 && report.availableArea<report.freeArea,"Publication failed to pass clearance settings to offcut evaluator");
     require(result.bitmapStats.offcutEvaluations==sequence,"Spacing check evaluated unpublished candidates");
@@ -833,7 +837,7 @@ void continuousDenseAnglesRetained() {
   auto part=rotatePolygon(rectangle(0,0,8,0.9999,1),-0.1);
   part.allowedAngles.clear();defaultAllowedAngles(part,3600);
   BackgroundRequest request;request.config=cfg;request.sheets={sheet};request.individual.placement={part};
-  bool complete=false;const auto started=std::chrono::steady_clock::now();
+  std::atomic<bool> complete{false};const auto started=std::chrono::steady_clock::now();
   const auto result=runContinuousNesting(request,[&] {return complete || std::chrono::steady_clock::now()-started>std::chrono::seconds(5);},
     [&](const auto&,const auto& run,size_t) {complete=run.placement.unplaced.empty();});
   require(complete,"Dense seed permanently restricted the recursive angle policy");
@@ -997,9 +1001,121 @@ void recursiveTreeAndGpuParity() {
   require(large.recursiveExhausted && large.recursiveNodes==small.recursiveNodes && large.recursiveNodes>4096,
           "Growing GPU batches skipped or repeated part of the recursive grid");
 }
+void publicationMailbox() {
+  std::promise<void> entered,release;
+  auto gate=release.get_future().share();std::vector<int> seen;
+  detail::LatestResultPublisher<int> publisher([&](int value) {
+    if(value==1) {entered.set_value();gate.wait();}
+    seen.push_back(value);
+  });
+  publisher.submit(1);entered.get_future().wait();
+  // The consumer is blocked, but submission must remain independent.
+  publisher.submit(2);publisher.submit(3);release.set_value();publisher.close();
+  require(seen==std::vector<int>({1,3}),"Slow reporting blocked or lost the newest pending result");
+  detail::LatestResultPublisher<int> broken([](int) {throw std::runtime_error("report failed");});
+  broken.submit(1);bool threw=false;
+  try {broken.close();} catch(const std::runtime_error&) {threw=true;}
+  require(threw && broken.failed(),"Reporting exception did not reach the caller");
+}
+void continuousInitialCompletion() {
+  BackgroundRequest request;request.config=settings();
+  auto& cfg=request.config;cfg.spacing=cfg.holeSpacing=cfg.sheetSpacing=1;
+  cfg.threads=2;cfg.continuousRoundSeconds=0.01;cfg.timeLimitSeconds=8;
+  cfg.reusableOffcutEnabled=false;
+  request.sheets={rectangle(-5,7,100,100,77)};
+  for(int i=0;i<600;++i) request.individual.placement.push_back(rectangle(0,0,2,2,i+1));
+  std::atomic<bool> done{false};size_t partials=0,previous=0;
+  const auto result=runContinuousNesting(request,[&] {return done.load();},[&](const auto&,const auto& run,size_t) {
+    const auto count=600-run.placement.unplaced.size();
+    require(count>=previous,"Initial placement restarted after its snapshot interval");previous=count;
+    if(run.bitmapStats.layoutInProgress) ++partials;
+    if(run.placement.unplaced.empty()) done=true;
+  });
+  require(partials>0 && result.placement.unplaced.empty(),"Snapshot interval interrupted a feasible initial layout");
+  valid(request.sheets.front(),request.individual.placement,result.placement,cfg);
+  // Cancellation in the middle of the same persistent pass preserves a valid
+  // partial layout and accounts for every copy, including unprocessed ones.
+  done=false;previous=0;
+  const auto cancelled=runContinuousNesting(request,[&] {return done.load();},[&](const auto&,const auto& run,size_t) {
+    if(run.bitmapStats.layoutInProgress) done=true;
+  });
+  require(cancelled.bitmapStats.cancelled && !cancelled.placement.unplaced.empty(),"Progress cancellation did not interrupt the live pass");
+  std::set<int> ids;
+  for(const auto& sheet:cancelled.placement.placements) for(const auto& p:sheet.sheetplacements)
+    require(ids.insert(*p.id).second,"Duplicate placed copy after cancellation");
+  for(const auto& p:cancelled.placement.unplaced) require(ids.insert(*p.id).second,"Copy both placed and unplaced");
+  require(ids.size()==600,"Cancellation lost unprocessed copies");
+  valid(request.sheets.front(),request.individual.placement,cancelled.placement,cfg);
+}
+void fillBeforeRepair() {
+  auto cfg=settings();cfg.spacing=cfg.sheetSpacing=cfg.holeSpacing=0;
+  cfg.timeLimitSeconds=2;cfg.searchIteration=1;cfg.bitmapFillOnly=true;
+  const auto sheet=rectangle(0,0,10,2,77);
+  std::vector<Polygon> parts{rectangle(0,0,1,1,1),rectangle(0,0,1,1,2),rectangle(0,0,1,1,3)};
+  Placement a;a.id=1;a.x=4;Placement b;b.id=2;b.x=6;
+  PlacementResult incumbent;incumbent.placements.push_back({sheet.source,sheet.id,{a,b}});
+  incumbent.area=2;incumbent.totalarea=20;incumbent.unplaced={parts[2]};
+  BitmapNestingStats stats;auto result=refillBitmapLayout({sheet},parts,incumbent,cfg,&stats);
+  require(result.unplaced.empty() && stats.vectorMoves==0 && stats.refillPlacements==1,"Fill spent its budget repairing accepted parts");
+  for(const auto& p:result.placements.front().sheetplacements) {
+    if(p.id==1) require(p.x==4 && p.y==0,"Fill moved its first incumbent");
+    if(p.id==2) require(p.x==6 && p.y==0,"Fill moved its second incumbent");
+  }
+  valid(sheet,parts,result,cfg);
+}
+void residentInitialGpu() {
+  std::vector<GpuDeviceInfo> devices;try {devices=listGpuDevices();}catch(...) {return;}
+  if(devices.empty()) return;
+  auto cfg=settings();cfg.bitmapBottomLeft=true;cfg.spacing=cfg.sheetSpacing=cfg.holeSpacing=1;
+  const auto sheet=rectangle(0,0,80,30,77);std::vector<Polygon> parts;
+  for(int i=0;i<30;++i) {auto p=rectangle(0,0,2+i%3,2,i+1);p.allowedAngles={0,90};parts.push_back(p);}
+  auto cpu=placePartsBitmap({sheet},parts,cfg);
+  cfg.gpuEnabled=true;cfg.gpuFallbackToCpu=false;cfg.gpuDevice=devices.front().index;
+  BitmapNestingStats stats;auto gpu=placePartsBitmap({sheet},parts,cfg,&stats);
+  sameLayout(cpu,gpu);valid(sheet,parts,gpu,cfg);
+  require(stats.gpuOccupancyUpdates==parts.size(),"Initial GPU occupancy was not updated on-device");
+  require(stats.gpuOccupancyUploadBytes==2*30*sizeof(uint64_t),"Initial search reuploaded the whole sheet");
+}
+
+void progressiveMultipleSheets() {
+  auto cfg=settings();cfg.spacing=cfg.holeSpacing=cfg.sheetSpacing=0;
+  cfg.bitmapBottomLeft=true;cfg.layoutSnapshotSeconds=1e-9;
+  std::vector<Polygon> sheets{rectangle(-5,7,3,1,77),rectangle(10,-8,3,1,78)};
+  std::vector<Polygon> parts;for(int i=0;i<6;++i) parts.push_back(rectangle(0,0,1,1,i+1));
+  size_t snapshots=0;
+  const auto result=placePartsBitmap(sheets,parts,cfg,nullptr,{},[&](const auto& layout,const auto& stats) {
+    std::set<int> ids;size_t placed=0;
+    for(const auto& sheet:layout.placements) for(const auto& p:sheet.sheetplacements) {
+      require(ids.insert(*p.id).second,"Snapshot duplicated an earlier sheet's copy");++placed;
+    }
+    for(const auto& p:layout.unplaced) require(ids.insert(*p.id).second,"Snapshot misreported remaining copies");
+    require(ids.size()==6 && placed==stats.placedParts,"Multi-sheet snapshot lost copies or counters");
+    if(stats.layoutInProgress) ++snapshots;
+  });
+  require(snapshots>0 && result.unplaced.empty() && result.placements.size()==2,"Progressive multi-sheet pass failed");
+}
+void recursiveNeighbourScaling() {
+  auto cfg=settings();cfg.mode=SearchMode::Continuous;cfg.spacing=cfg.holeSpacing=cfg.sheetSpacing=0;
+  const auto sheet=rectangle(-10,5,120,1,77);std::vector<Polygon> parts;
+  for(int i=0;i<100;++i) parts.push_back(rectangle(0,0,1,1,i+1));
+  bool done=false;cfg.stopRequested=[&] {return done;};BitmapNestingStats stats;
+  auto result=placePartsBitmap({sheet},parts,cfg,&stats,{},[&](const auto& layout,const auto&) {done=layout.unplaced.empty();});
+  require(result.unplaced.empty() && stats.vectorChecks<1000,"Recursive search scanned distant placed parts");
+  valid(sheet,parts,result,cfg);
+}
+void continuousReportingFailure() {
+  BackgroundRequest request;request.config=settings();request.config.reusableOffcutEnabled=false;
+  request.sheets={rectangle(0,0,10,10,77)};request.individual.placement={rectangle(0,0,1,1,1)};
+  bool threw=false;
+  try {runContinuousNesting(request,[]{return false;},[](const auto&,const auto&,size_t) {throw std::runtime_error("save failed");});}
+  catch(const std::runtime_error& e) {threw=std::string(e.what())=="save failed";}
+  require(threw,"Failed asynchronous publication did not stop the search");
+}
+
 int main(int argc,char** argv) {
   try {
     cliTraceFields();
+    if(argc==2 && std::string(argv[1])=="--continuous-fixes") { publicationMailbox();continuousInitialCompletion();fillBeforeRepair();residentInitialGpu();progressiveMultipleSheets();recursiveNeighbourScaling();continuousReportingFailure();recursiveTreeAndGpuParity();std::cout<<"Continuous fixes passed\n";return 0; }
     if(argc==2 && std::string(argv[1])=="--offcut-only") { offcutClearances();offcutPublicationOnly();reusableOffcutObjective();std::cout<<"Offcut regressions passed\n";return 0; }
     if(argc==2 && std::string(argv[1])=="--dense-rotations-only") {
       continuousDenseAnglesRetained();lazyGpuMaskUploads();refillSeedRasterRoundoff();
@@ -1008,6 +1124,7 @@ int main(int argc,char** argv) {
     if(argc==2 && std::string(argv[1])=="--raster-boundary-only") {
       refillSeedRasterRoundoff();std::cout<<"Raster boundary regression passed\n";return 0;
     }
+    publicationMailbox();continuousInitialCompletion();fillBeforeRepair();residentInitialGpu();progressiveMultipleSheets();recursiveNeighbourScaling();continuousReportingFailure();
     offcutClearances();offcutPublicationOnly();reusableOffcutObjective();continuousDenseAnglesRetained();lazyGpuMaskUploads();refillSeedRasterRoundoff();concavePocketAngleCoverage();concavePocketRelocation();interlockingGroups();continuousContactPortfolio();incumbentRefill();residentGpuOccupancies();parallelRecursivePartitions();recursiveDuplicateSkipPruning();recursiveTreeAndGpuParity();restartAnchorAngles();cacheBudgetValidation();continuousDeadlineLifecycle();sparseRejectionBudgetAndFailureEpochs();gpuOrderedBatchParity();stockObstaclesInBottomLeftSearch();fractionalHoleAndSheetMargins();modeSearchAndRefinement();bottomLeftSearch();scanlines();freeRectangleProof();mixedPanelsAndMultipleSheets();duplicateContours();holesFirst();rotatedAndMultipleHoles();concavePocket();rowsAndGpuPolicy();interrupted();mixedOneAngleWorkers();repeatedInsertsAfterHoleFills();singletonWindowExpansion();gpuFailurePolicy();gpuFastPathsWhenAvailable();
     std::cout<<"All nesting regression checks passed\n";return 0;
   } catch(const std::exception& e) {std::cerr<<e.what()<<"\n";return 1;}

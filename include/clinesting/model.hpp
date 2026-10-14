@@ -110,7 +110,9 @@ struct Config {
   double timeLimitSeconds{0.0}; // 0 = unlimited; shared by every bitmap strategy/sheet
   bool continuous{false};
   SearchMode mode{SearchMode::First};
-  double continuousRoundSeconds{30.0};
+  double continuousRoundSeconds{30.0}; // Initial-layout snapshot interval; never interrupts placement.
+  double layoutSnapshotSeconds{0.0}; // Internal progressive-placement callback interval.
+  bool bitmapFillOnly{false}; // Preserve incumbent placements; prioritize missing copies.
   bool reusableOffcutEnabled{true}; // Measure offcut only before publishing continuous improvements.
   double reusableOffcutMinWidthMm{5.0};
   uint64_t searchIteration{0}; // Internal restart variation; zero keeps the original strategies.

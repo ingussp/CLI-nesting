@@ -370,7 +370,7 @@ Every field below belongs inside `config`.
 |---|---|---|
 | `mode` | Inferred, normally `first` | `first`, `continuous` |
 | `timeLimitSeconds` | 0 | 0..86400; continuous total budget in seconds, 0 = unlimited; first requires 0 |
-| `continuousRoundSeconds` | 30 | 0.01..86400; maximum continuous initial-layout budget, capped by the remaining total time |
+| `continuousRoundSeconds` | 30 | 0.01..86400; initial-layout snapshot interval; placement continues between snapshots, bounded only by cancellation or the total time limit |
 | `threads` | Logical CPU count | Integer 1..256; shared CPU worker budget |
 | `resolution` | 1 mm/pixel | Positive value up to 1000000; smaller values increase raster detail and memory |
 | `step` | 1 pixel | Integer 1..100000; translation step is `step * resolution` |
@@ -416,6 +416,25 @@ its deadline or a cancellation request.
 
 Cancellation and deadlines are cooperative: active GPU/geometry calls and output
 can add time. Completed snapshots remain available after a stop.
+
+The initial pass retains its masks, occupancy and remaining-copy cursor across
+`continuousRoundSeconds` snapshots. A snapshot can be partial: `placementInProgress`
+and `stopReason: "in_progress"` distinguish this from a finished pass. Only the
+total deadline or cancellation interrupts that pass. Missing copies receive a
+non-destructive refill attempt before neighbourhood compaction/repair.
+
+Offcut evaluation and file publication run on one reporting thread outside the
+incumbent lock. At most one newest pending improvement is retained, so reporting
+can skip superseded intermediate candidates without blocking placement. Saved
+layouts remain ordered improvements and the final pending result is drained on
+shutdown. Reporting and active geometry calls can extend shutdown beyond the
+search deadline. The reporting thread is additional to the search worker budget.
+
+The GPU keeps initial-layout occupancy resident and updates it on-device after
+each accepted placement. `gpuOccupancy.uploadBytes` and `deviceUpdates` report
+these transfers/updates for the selected bitmap strategy. Exact CPU validation
+remains authoritative; recursive validation uses a removable neighbour index
+with clearance-expanded queries, including during backtracking.
 
 The objective prioritizes fewer unplaced copies, then less unused material in
 used sheets, then smaller occupied bounds and less placement spread. Search is

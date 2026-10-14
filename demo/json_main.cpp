@@ -10,6 +10,7 @@
 #include <optional>
 #include <cctype>
 #include <chrono>
+#include <thread>
 #ifdef _WIN32
 #include <shellapi.h>
 #endif
@@ -62,8 +63,16 @@ void publishResult(const std::filesystem::path& output,const clinesting::Backgro
     std::filesystem::create_directories(output.parent_path());
     clinesting::writeNestingJson(temporary,request,result);
 #ifdef _WIN32
-    if(!MoveFileExW(temporary.c_str(),output.c_str(),MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH))
-      throw std::runtime_error("Cannot publish latest result JSON");
+    // Readers on Windows may temporarily deny replacement while polling JSON.
+    // Keep the old complete file visible and retry only transient sharing errors.
+    const auto deadline=std::chrono::steady_clock::now()+std::chrono::seconds(2);
+    while(!MoveFileExW(temporary.c_str(),output.c_str(),MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH)) {
+      const auto error=GetLastError();
+      if((error!=ERROR_SHARING_VIOLATION && error!=ERROR_LOCK_VIOLATION && error!=ERROR_ACCESS_DENIED)
+          || std::chrono::steady_clock::now()>=deadline)
+        throw std::runtime_error("Cannot publish latest result JSON (Windows error "+std::to_string(error)+")");
+      std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
 #else
     std::filesystem::rename(temporary,output);
 #endif
@@ -197,7 +206,7 @@ int main(int argc,char** argv) {
       clinesting::cli::ResultDirectory results(base,absoluteInput);
       std::cout<<"Continuous search: cleared "<<results.path().string()<<"\n"
                <<"Press Ctrl+C or close this console to stop. Improving layouts are saved immediately.\n"
-               <<"Initial layout budget: "<<request.config.continuousRoundSeconds<<" seconds; total time limit: "
+               <<"Initial layout snapshot interval: "<<request.config.continuousRoundSeconds<<" seconds; total time limit: "
                <<request.config.timeLimitSeconds<<" seconds (0 = unlimited).\n"<<std::flush;
       std::ofstream progressLog(base/"recursive-progress.log",std::ios::app);
       if(!progressLog) throw std::runtime_error("Cannot open recursive-progress.log");

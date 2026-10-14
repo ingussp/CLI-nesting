@@ -80,6 +80,8 @@ PlacementResult recursiveBitmapSearch(const std::vector<Polygon>& sheets,
     BitmapGrid material,occupied;
     std::vector<Polygon> geometry;
     std::vector<Placement> placed;
+    std::unique_ptr<SpatialIndex> neighbours;
+    std::vector<Bounds> geometryBounds;
   };
   std::vector<Stock> stocks;
   struct Policy {uint32_t first,count;int minWidth{INT32_MAX},minHeight{INT32_MAX};};
@@ -157,6 +159,8 @@ PlacementResult recursiveBitmapSearch(const std::vector<Polygon>& sheets,
     for(size_t s=0;s<sheets.size();++s) {
       stocks[s].material=rasterizeSheetMaterial(sheets[s],config.bitmapResolutionMm,stocks[s].bounds,deadline,parallel);
       stocks[s].occupied=makeBitmapGrid(stocks[s].material.widthPx,stocks[s].material.heightPx);
+      stocks[s].neighbours=std::make_unique<SpatialIndex>(std::max(config.bitmapResolutionMm,
+          std::max(stocks[s].bounds.width,stocks[s].bounds.height)/32.0));
     }
     std::unordered_map<std::string,Policy> cached;
 
@@ -213,6 +217,8 @@ PlacementResult recursiveBitmapSearch(const std::vector<Polygon>& sheets,
       if(frame.active) {
         auto& stock=stocks[frame.sheet];
         toggle(frame.sheet,frame.chosen.rotation,frame.chosen.x,frame.chosen.y);
+        stock.neighbours->erase(stock.geometryBounds.back(),stock.geometry.size()-1);
+        stock.geometryBounds.pop_back();
         stock.placed.pop_back();stock.geometry.pop_back();
         placed[depth]=false;--placedCount;placedArea-=polygonMaterialArea(parts[depth]);
         frame.active=false;++counts.recursiveBacktracks;
@@ -322,14 +328,23 @@ PlacementResult recursiveBitmapSearch(const std::vector<Polygon>& sheets,
       auto geometry=shiftPolygon(mask.rotatedPart,translation);
       if(violatesSheetClearance(geometry,sheets[frame.sheet],config)) {++counts.boundaryRejects;continue;}
       bool collision=false;
-      for(const auto& previous:stock.geometry) {
-        deadline.check();++counts.vectorChecks;
-        if(violatesPartClearance(geometry,previous,config)) {collision=true;break;}
+      const auto bounds=getPolygonBounds(geometry.points);
+      const double gap=std::max(config.spacing,config.holeSpacing)+1e-7;
+      const Bounds nearby{bounds.x-gap,bounds.y-gap,bounds.width+2*gap,bounds.height+2*gap};
+      for(size_t previous:stock.neighbours->query(nearby)) {
+        deadline.check();
+        const auto& b=stock.geometryBounds[previous];
+        if(b.x>nearby.x+nearby.width || b.y>nearby.y+nearby.height ||
+           b.x+b.width<nearby.x || b.y+b.height<nearby.y) continue;
+        ++counts.vectorChecks;
+        if(violatesPartClearance(geometry,stock.geometry[previous],config)) {collision=true;break;}
       }
       if(collision) {++counts.vectorValidationRejects;continue;}
       toggle(frame.sheet,r,x,y);
       const auto& part=parts[depth];
       stock.placed.push_back({translation.x,translation.y,part.id,mask.rotationDeg,part.source,part.filename,0,{}});
+      stock.neighbours->insert(bounds,stock.geometry.size());
+      stock.geometryBounds.push_back(bounds);
       stock.geometry.push_back(std::move(geometry));
       placed[depth]=true;++placedCount;placedArea+=polygonMaterialArea(part);
       frame.active=true;frame.chosen={x,y,r};frame.chosenIndex=(index/policy.count)*policies[depth].count+(r-policies[depth].first);++counts.recursiveNodes;

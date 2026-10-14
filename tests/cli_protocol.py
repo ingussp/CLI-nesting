@@ -96,6 +96,41 @@ class ProtocolTests(unittest.TestCase):
         self.assertIn('Recursive finished:', log)
         self.assertIn('cancelled=1', log)
 
+    @unittest.skipUnless(os.name == 'nt', 'Windows file sharing semantics')
+    def test_latest_publication_retries_while_reader_holds_file(self):
+        import ctypes
+        from ctypes import wintypes
+        kernel = ctypes.WinDLL('kernel32', use_last_error=True)
+        kernel.CreateFileW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD,
+                                      ctypes.c_void_p, wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE]
+        kernel.CreateFileW.restype = wintypes.HANDLE
+        kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+        kernel.CloseHandle.restype = wintypes.BOOL
+        path, data = self.job('continuous')
+        self.process = subprocess.Popen([EXE, '--input', str(path)], cwd=self.root,
+                                        stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        latest = self.root / 'result.json'
+        deadline = time.monotonic() + 10
+        while not latest.exists() and time.monotonic() < deadline:
+            self.assertIsNone(self.process.poll())
+            time.sleep(.01)
+        self.assertTrue(latest.exists())
+        # Permit reading/writing, deliberately deny FILE_SHARE_DELETE.
+        handle = kernel.CreateFileW(str(latest), 0x80000000, 3, None, 3, 0, None)
+        self.assertNotEqual(handle, ctypes.c_void_p(-1).value)
+        try:
+            (self.root / data['output']['cancelFile']).touch()
+            time.sleep(.4)
+            self.assertIsNone(self.process.poll(), 'Writer must wait for the transient reader')
+        finally:
+            kernel.CloseHandle(handle)
+        _, errors = self.process.communicate(timeout=5)
+        self.assertEqual(self.process.returncode, 0, errors)
+        result = json.loads(latest.read_text())
+        self.assertEqual(result['placed'], 12)
+        self.assertEqual(result['stopReason'], 'user_stop')
+        self.assertFalse(list(self.root.rglob('*.tmp')))
+
     def test_continuous_deadline_stops_seed_and_parallel_workers(self):
         for threads, copies, seed_budget in ((1, 1, .01), (4, 16, .01), (2, 12, 30)):
             with self.subTest(threads=threads, copies=copies, seed_budget=seed_budget):

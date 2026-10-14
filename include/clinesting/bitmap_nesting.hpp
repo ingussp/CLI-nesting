@@ -20,6 +20,8 @@ struct BitmapNestingStats {
   std::string gpuFallbackReason;
   size_t gpuCandidates{0};
   size_t gpuBatches{0};
+  size_t gpuOccupancyUploadBytes{0},gpuOccupancyUpdates{0};
+  bool layoutInProgress{false};
   size_t recursiveNodes{0},recursiveBacktracks{0},recursiveMaxDepth{0};
   size_t recursiveDuplicateSkips{0};
   bool recursiveExhausted{false};

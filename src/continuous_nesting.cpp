@@ -1,6 +1,7 @@
 #include "clinesting/continuous_nesting.hpp"
 #include "clinesting/geometry.hpp"
 #include "joining_thread.hpp"
+#include "latest_result_publisher.hpp"
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -61,7 +62,7 @@ OrchestratorRunStats runContinuousNesting(BackgroundRequest request,const std::f
   request.config.mode=SearchMode::Continuous;
   request.config.searchIteration=0;
   std::optional<LayoutQuality> incumbent;
-  size_t sequence=0;
+  size_t sequence=0,bestRevision=0;
   const auto started=std::chrono::steady_clock::now();
   const auto end=started+std::chrono::duration_cast<std::chrono::steady_clock::duration>(std::chrono::duration<double>(budget));
   auto expired=[&] { return limited && std::chrono::steady_clock::now()>=end; };
@@ -88,34 +89,48 @@ OrchestratorRunStats runContinuousNesting(BackgroundRequest request,const std::f
   };
   std::string gpuDevice,gpuFallback;
   size_t offcutEvaluations=0;double offcutMs=0;
-  auto consider=[&](const PlacementResult& placement,const BitmapNestingStats& stats) {
-    std::lock_guard lock(incumbentMutex);
-    const auto quality=layoutQuality(request.sheets,placement,stats);
-    if(incumbent && !improvesLayout(quality,*incumbent)) return;
-    OrchestratorRunStats result;
-    result.searchIteration=request.config.searchIteration;
-    result.placement=placement;
-    result.bitmapStats=stats;
-    result.bitmapStats.cancelled=stopped();
-    result.bitmapStats.timeLimitReached=expired() && !result.bitmapStats.cancelled;
-    if(hybrid) {result.bitmapStats.continuousPortfolio=true;result.bitmapStats.cpuWorkersUsed=configuredWorkers;}
-    result.timings.bitmapMs=stats.totalBitmapMs;
-    result.timings.placementMs=stats.totalBitmapMs;
-    // The original search objective has already accepted this layout. Measure
-    // exactly once before publishing; never score rejected candidates or veto
-    // a selected result because of its offcut area or a late cancellation.
-    if(request.config.reusableOffcutEnabled) {
-      result.bitmapStats.reusableOffcut=measureReusableOffcut(request.sheets,
-          request.individual.placement,placement,request.config);
+  using Publication=std::pair<size_t,OrchestratorRunStats>;
+  const auto publicationRequest=request;
+  detail::LatestResultPublisher<Publication> publisher([&](Publication publication) {
+    auto& result=publication.second;
+    // Only this consumer evaluates offcuts and writes files. Search workers
+    // can replace the incumbent while reporting processes an immutable copy.
+    if(publicationRequest.config.reusableOffcutEnabled) {
+      result.bitmapStats.reusableOffcut=measureReusableOffcut(publicationRequest.sheets,
+          publicationRequest.individual.placement,result.placement,publicationRequest.config);
       offcutMs+=result.bitmapStats.reusableOffcut.elapsedMs;++offcutEvaluations;
       result.bitmapStats.offcutEvaluations=offcutEvaluations;
       result.bitmapStats.offcutEvaluationMs=offcutMs;
     }
     result.timings.totalMs=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-started).count();
-    onImprovement(request,result,sequence+1);
-    best=result;
-    incumbent=quality;
-    ++sequence;
+    auto candidate=publicationRequest;candidate.config.searchIteration=result.searchIteration;
+    onImprovement(candidate,result,++sequence);
+    std::lock_guard lock(incumbentMutex);
+    // Reporting an older snapshot must never replace a newer search result.
+    if(publication.first==bestRevision) {
+      best.bitmapStats.reusableOffcut=result.bitmapStats.reusableOffcut;
+      best.bitmapStats.offcutEvaluations=offcutEvaluations;
+      best.bitmapStats.offcutEvaluationMs=offcutMs;
+    }
+  });
+  request.config.stopRequested=[&] {return publisher.failed() || stopped() || expired();};
+  auto consider=[&](const PlacementResult& placement,const BitmapNestingStats& stats) {
+    const auto quality=layoutQuality(request.sheets,placement,stats);
+    std::lock_guard lock(incumbentMutex);
+    if(incumbent && !improvesLayout(quality,*incumbent)) {
+      if(!stats.layoutInProgress && quality.unplaced==incumbent->unplaced)
+        best.bitmapStats.layoutInProgress=false;
+      return;
+    }
+    OrchestratorRunStats result;
+    result.searchIteration=request.config.searchIteration;
+    result.placement=placement;result.bitmapStats=stats;
+    result.bitmapStats.cancelled=stopped();
+    result.bitmapStats.timeLimitReached=expired() && !result.bitmapStats.cancelled;
+    if(hybrid) {result.bitmapStats.continuousPortfolio=true;result.bitmapStats.cpuWorkersUsed=configuredWorkers;}
+    result.timings.bitmapMs=stats.totalBitmapMs;result.timings.placementMs=stats.totalBitmapMs;
+    best=result;incumbent=quality;
+    publisher.submit({++bestRevision,std::move(result)});
   };
   // Adapt nesting events to the current command-line workflow.
   class Sink final:public EventSink {
@@ -140,8 +155,10 @@ OrchestratorRunStats runContinuousNesting(BackgroundRequest request,const std::f
       const auto allowed=std::move(part.allowedAngles);part.allowedAngles.clear();
       for(size_t i=0;i<360;++i) part.allowedAngles.push_back(allowed[i*allowed.size()/360]);
     }
-    seed.config.timeLimitSeconds=limited ? std::max(0.000001,std::min(
-        request.config.continuousRoundSeconds,std::chrono::duration<double>(end-std::chrono::steady_clock::now()).count())) : request.config.continuousRoundSeconds;
+    // The interval publishes snapshots; only the global deadline or user
+    // cancellation may interrupt this live placement state.
+    seed.config.timeLimitSeconds=0;
+    seed.config.layoutSnapshotSeconds=request.config.continuousRoundSeconds;
     const auto initial=orchestrator.runWithStats(seed,sink,consider);
     recordWorkers(initial.bitmapStats);
     gpuBatches+=initial.bitmapStats.gpuBatches;
@@ -151,7 +168,7 @@ OrchestratorRunStats runContinuousNesting(BackgroundRequest request,const std::f
     consider(initial.placement,initial.bitmapStats);
     request.config.searchIteration=1;
   }
-  while(!stopped() && !expired()) {
+  while(!publisher.failed() && !stopped() && !expired()) {
     const auto result=[&] {
       if(!hybrid) {
         auto search=request;search.config.timeLimitSeconds=0;
@@ -171,7 +188,8 @@ OrchestratorRunStats runContinuousNesting(BackgroundRequest request,const std::f
       } stopHelpers{finished};
       for(int worker=0;worker<helpers;++worker) pool.emplace_back([&,worker] {
         try {
-          while(!finished && !stopped() && !expired()) {
+          size_t failedFillRevision=SIZE_MAX;
+          while(!finished && !publisher.failed() && !stopped() && !expired()) {
             const uint64_t trial=nextTrial.fetch_add(1);
             const uint64_t variation=trial/4;
             auto cfg=request.config;cfg.threads=1;cfg.gpuEnabled=false;cfg.bitmapTrials=1;
@@ -179,16 +197,24 @@ OrchestratorRunStats runContinuousNesting(BackgroundRequest request,const std::f
             cfg.bitmapGroupTrial=trial%4==0;cfg.bitmapBottomLeft=!cfg.bitmapGroupTrial;
             cfg.timeLimitSeconds=cfg.bitmapGroupTrial ? 5.0 : 3.0;
             cfg.stopRequested=[&,nextPoll=std::chrono::steady_clock::time_point{}]() mutable {
-              if(finished.load()) return true;
+              if(finished.load() || publisher.failed()) return true;
               const auto now=std::chrono::steady_clock::now();if(now<nextPoll) return false;
               nextPoll=now+std::chrono::milliseconds(20);return stopped() || expired();
             };
             PlacementResult candidate;BitmapNestingStats data;
-            const bool repair=trial%4==3;
+            const bool repair=worker==0 || trial%4==3;
             if(repair) {
-              PlacementResult incumbentCopy;
-              {std::lock_guard lock(incumbentMutex);incumbentCopy=best.placement;}
+              PlacementResult incumbentCopy;size_t revision;
+              {std::lock_guard lock(incumbentMutex);incumbentCopy=best.placement;revision=bestRevision;}
+              // Add missing copies before releasing or moving accepted parts.
+              // Only one helper owns GPU refill, avoiding competing contexts.
+              cfg.bitmapFillOnly=!incumbentCopy.unplaced.empty() && revision!=failedFillRevision;
+              if(cfg.bitmapFillOnly) {
+                cfg.timeLimitSeconds=std::max(3.0,request.config.continuousRoundSeconds);
+                cfg.gpuEnabled=worker==0 && request.config.gpuEnabled;
+              }
               candidate=refillBitmapLayout(request.sheets,request.individual.placement,incumbentCopy,cfg,&data);
+              if(cfg.bitmapFillOnly && candidate.unplaced.size()>=incumbentCopy.unplaced.size()) failedFillRevision=revision;
               ++helperStats[size_t(worker)].localRepairTrials;data.localRepairTrials=1;
             } else {
               auto parts=request.individual.placement;
@@ -220,7 +246,7 @@ OrchestratorRunStats runContinuousNesting(BackgroundRequest request,const std::f
       });
       auto grid=request;grid.config.threads=gridWorkers;
       grid.config.timeLimitSeconds=0;
-      grid.config.stopRequested=[&]{return finished.load() || stopped() || expired();};
+      grid.config.stopRequested=[&]{return finished.load() || publisher.failed() || stopped() || expired();};
       OrchestratorRunStats result;
       try {result=orchestrator.runWithStats(grid,sink,consider);}
       catch(...) {finished=true;pool.clear();throw;}
@@ -251,10 +277,13 @@ OrchestratorRunStats runContinuousNesting(BackgroundRequest request,const std::f
   if(!incumbent && !stopped()) consider(best.placement,best.bitmapStats);
   // The part algorithms may exhaust their finite search space. Keep the
   // continuous session alive without changing/restarting those algorithms.
-  if(!stopped() && !expired()) {
+  if(!publisher.failed() && !stopped() && !expired()) {
     request.config.searchProgress("Search pass completed; waiting for cancellation or the time limit.");
-    while(!stopped() && !expired()) std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    while(!publisher.failed() && !stopped() && !expired()) std::this_thread::sleep_for(std::chrono::milliseconds(10));
   }
+  publisher.close();
+  best.bitmapStats.offcutEvaluations=offcutEvaluations;
+  best.bitmapStats.offcutEvaluationMs=offcutMs;
   best.bitmapStats.maxPatternGroupSize=maxPatternGroupSize;
   best.bitmapStats.maxInterlockingCapacity=maxInterlockingCapacity;
   best.bitmapStats.continuousPortfolio=hybrid;best.bitmapStats.contactTrials=contactTrials;
