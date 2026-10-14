@@ -8,7 +8,7 @@
 #include <iostream>
 #include <mutex>
 #include <optional>
-#include <syncstream>
+#include <string>
 #include <thread>
 #ifdef _WIN32
 #ifndef NOMINMAX
@@ -47,13 +47,18 @@ class LatestJsonPublisher {
   // A busy file has no time limit; the console explains why shutdown is waiting.
   void finish() {
     {std::lock_guard lock(mutex_);closing_=true;ready_.notify_all();}
-    if(blocked_.load()) std::osyncstream(std::cout)
-        <<"Waiting for the latest result JSON to become available: "<<output_.string()<<"\n"<<std::flush;
+    if(blocked_.load()) message("Waiting for the latest result JSON to become available: "+output_.string()+"\n");
     if(worker_.joinable()) worker_.join();
     if(error_) std::rethrow_exception(error_);
   }
  private:
   struct Snapshot {uint64_t iteration;OrchestratorRunStats result;};
+  // Xcode's C++ library does not provide osyncstream on all supported targets.
+  // Keep this writer's diagnostics synchronized using a portable mutex.
+  void message(const std::string& text) {
+    std::lock_guard lock(messageMutex_);
+    std::cout<<text<<std::flush;
+  }
   bool replace() {
 #ifdef _WIN32
     if(MoveFileExW(temporary_.c_str(),output_.c_str(),MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH)) return true;
@@ -62,9 +67,8 @@ class LatestJsonPublisher {
     const bool permanentTarget=attributes!=INVALID_FILE_ATTRIBUTES &&
         (attributes&(FILE_ATTRIBUTE_DIRECTORY|FILE_ATTRIBUTE_READONLY));
     if(!permanentTarget && (error==ERROR_SHARING_VIOLATION || error==ERROR_LOCK_VIOLATION || error==ERROR_ACCESS_DENIED)) {
-      if(!blocked_.exchange(true)) std::osyncstream(std::cout)
-          <<"Latest result JSON is busy (Windows error "<<error<<"): "<<output_.string()
-          <<". Waiting in background; nesting and numbered results continue.\n"<<std::flush;
+      if(!blocked_.exchange(true)) message("Latest result JSON is busy (Windows error "+std::to_string(error)+
+          "): "+output_.string()+". Waiting in background; nesting and numbered results continue.\n");
       return false;
     }
     throw std::runtime_error("Cannot publish latest result JSON: "+output_.string()+
@@ -98,8 +102,7 @@ class LatestJsonPublisher {
           }
           if(replace()) {
             temporaryWritten=false;
-            if(blocked_.exchange(false)) std::osyncstream(std::cout)
-                <<"Latest result JSON is available; the newest prepared snapshot was published.\n"<<std::flush;
+            if(blocked_.exchange(false)) message("Latest result JSON is available; the newest prepared snapshot was published.\n");
             break;
           }
           std::unique_lock lock(mutex_);
@@ -116,7 +119,7 @@ class LatestJsonPublisher {
   }
   std::filesystem::path output_,temporary_;
   BackgroundRequest request_;
-  std::mutex mutex_;
+  std::mutex mutex_,messageMutex_;
   std::condition_variable ready_;
   std::optional<Snapshot> pending_;
   bool closing_{false},abort_{false};

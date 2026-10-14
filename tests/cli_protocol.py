@@ -155,7 +155,10 @@ class ProtocolTests(unittest.TestCase):
         self.assertEqual(completed.returncode, 1)
         self.assertLess(elapsed, 3)
         self.assertIn('Cannot publish latest result JSON:', completed.stderr)
-        self.assertIn(str(latest), completed.stderr)
+        # Windows may expand an 8.3 TEMP alias (RUNNER~1) to its full path.
+        # Check file identity rather than requiring identical path spelling.
+        reported = completed.stderr.split('Cannot publish latest result JSON: ', 1)[1].split(' (Windows error', 1)[0]
+        self.assertTrue(os.path.samefile(reported, latest))
         self.assertIn('Windows error', completed.stderr)
         self.assertTrue(latest.is_dir())
         self.assertFalse((self.root / 'result.json.tmp').exists())
