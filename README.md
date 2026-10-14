@@ -485,6 +485,18 @@ DXF is a CAD exchange file. Its sheets are arranged horizontally with 20 mm
 gaps, with part contours, holes and labels translated together. JSON retains the
 original stock coordinates. SVG is a colored preview.
 
+The latest `output.json` is published by a separate background writer. If a
+Windows reader temporarily blocks replacement, nesting and numbered JSON/DXF/SVG
+history continue. The writer waits without a timeout, retrying every 50 ms and
+replacing older pending snapshots with the newest one. The previous complete JSON
+stays visible until atomic replacement succeeds; pending snapshots do not build
+an unbounded queue. After cancellation or the time limit, the CLI waits for the
+final JSON to be published before exiting successfully and reports this waiting
+state in the console. Close the application holding the file if it stays busy.
+Permanent failures, including a read-only output file or an output path pointing
+to a directory, still report the path and Windows error code. Saved numbered
+results remain in `results/` even if latest-result publication fails.
+
 ### Result fields
 
 | Field | Meaning |

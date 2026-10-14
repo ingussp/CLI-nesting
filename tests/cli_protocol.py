@@ -107,20 +107,32 @@ class ProtocolTests(unittest.TestCase):
         kernel.CloseHandle.argtypes = [wintypes.HANDLE]
         kernel.CloseHandle.restype = wintypes.BOOL
         path, data = self.job('continuous')
-        self.process = subprocess.Popen([EXE, '--input', str(path)], cwd=self.root,
-                                        stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
         latest = self.root / 'result.json'
-        deadline = time.monotonic() + 10
-        while not latest.exists() and time.monotonic() < deadline:
-            self.assertIsNone(self.process.poll())
-            time.sleep(.01)
-        self.assertTrue(latest.exists())
+        previous = b'{"previous": "complete result"}'
+        latest.write_bytes(previous)
         # Permit reading/writing, deliberately deny FILE_SHARE_DELETE.
         handle = kernel.CreateFileW(str(latest), 0x80000000, 3, None, 3, 0, None)
         self.assertNotEqual(handle, ctypes.c_void_p(-1).value)
         try:
+            self.process = subprocess.Popen([EXE, '--input', str(path), '--dxf', 'result.dxf', '--svg', 'result.svg'],
+                                            cwd=self.root, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+            history = self.root / 'results' / 'result1.json'
+            deadline = time.monotonic() + 10
+            while not history.exists() and time.monotonic() < deadline:
+                self.assertIsNone(self.process.poll())
+                time.sleep(.01)
+            self.assertTrue(history.exists(), 'History must be saved while latest JSON is locked')
+            self.assertTrue(history.with_suffix('.dxf').is_file())
+            ET.parse(history.with_suffix('.svg'))
+            time.sleep(6)
+            self.assertIsNone(self.process.poll(), 'A busy latest file must not stop nesting after five seconds')
+            self.assertEqual(latest.read_bytes(), previous)
             (self.root / data['output']['cancelFile']).touch()
-            time.sleep(.4)
+            progress = self.root / 'recursive-progress.log'
+            deadline = time.monotonic() + 5
+            while 'Recursive finished:' not in progress.read_text() and time.monotonic() < deadline:
+                time.sleep(.01)
+            self.assertIn('Recursive finished:', progress.read_text(), 'Search must finish independently of latest JSON')
             self.assertIsNone(self.process.poll(), 'Writer must wait for the transient reader')
         finally:
             kernel.CloseHandle(handle)
@@ -130,6 +142,23 @@ class ProtocolTests(unittest.TestCase):
         self.assertEqual(result['placed'], 12)
         self.assertEqual(result['stopReason'], 'user_stop')
         self.assertFalse(list(self.root.rglob('*.tmp')))
+
+    @unittest.skipUnless(os.name == 'nt', 'Windows file sharing semantics')
+    def test_latest_publication_rejects_permanent_invalid_target(self):
+        path, _ = self.job('first')
+        latest = self.root / 'result.json'
+        latest.mkdir()
+        started = time.monotonic()
+        completed = subprocess.run([EXE, '--input', str(path)], cwd=self.root,
+                                   capture_output=True, text=True, timeout=5)
+        elapsed = time.monotonic() - started
+        self.assertEqual(completed.returncode, 1)
+        self.assertLess(elapsed, 3)
+        self.assertIn('Cannot publish latest result JSON:', completed.stderr)
+        self.assertIn(str(latest), completed.stderr)
+        self.assertIn('Windows error', completed.stderr)
+        self.assertTrue(latest.is_dir())
+        self.assertFalse((self.root / 'result.json.tmp').exists())
 
     def test_continuous_deadline_stops_seed_and_parallel_workers(self):
         for threads, copies, seed_budget in ((1, 1, .01), (4, 16, .01), (2, 12, 30)):

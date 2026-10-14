@@ -3,6 +3,7 @@
 #include "clinesting/gpu_bitmap.hpp"
 #include "clinesting/continuous_nesting.hpp"
 #include "continuous_results.hpp"
+#include "latest_json.hpp"
 #include <atomic>
 #include <csignal>
 #include <iostream>
@@ -55,31 +56,6 @@ struct Signals {
 #endif
   }
 };
-// Publish a complete root result; GUI readers see the old or the new JSON.
-void publishResult(const std::filesystem::path& output,const clinesting::BackgroundRequest& request,
-                   const clinesting::OrchestratorRunStats& result) {
-  auto temporary=output; temporary+=".tmp";
-  try {
-    std::filesystem::create_directories(output.parent_path());
-    clinesting::writeNestingJson(temporary,request,result);
-#ifdef _WIN32
-    // Readers on Windows may temporarily deny replacement while polling JSON.
-    // Keep the old complete file visible and retry only transient sharing errors.
-    const auto deadline=std::chrono::steady_clock::now()+std::chrono::seconds(2);
-    while(!MoveFileExW(temporary.c_str(),output.c_str(),MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH)) {
-      const auto error=GetLastError();
-      if((error!=ERROR_SHARING_VIOLATION && error!=ERROR_LOCK_VIOLATION && error!=ERROR_ACCESS_DENIED)
-          || std::chrono::steady_clock::now()>=deadline)
-        throw std::runtime_error("Cannot publish latest result JSON (Windows error "+std::to_string(error)+")");
-      std::this_thread::sleep_for(std::chrono::milliseconds(20));
-    }
-#else
-    std::filesystem::rename(temporary,output);
-#endif
-  } catch(...) {
-    std::error_code ignored; std::filesystem::remove(temporary,ignored); throw;
-  }
-}
 // Read the process-wide cooperative stop request.
 bool stopped() {
   if(stopRequested.load(std::memory_order_relaxed)) return true;
@@ -204,6 +180,7 @@ int main(int argc,char** argv) {
          (cancelFile && clinesting::cli::within(clinesting::cli::resolvePath(*cancelFile),base/"results")))
         throw std::invalid_argument("Latest result and cancel file must be outside continuous results history");
       clinesting::cli::ResultDirectory results(base,absoluteInput);
+      clinesting::cli::LatestJsonPublisher latest(output,request);
       std::cout<<"Continuous search: cleared "<<results.path().string()<<"\n"
                <<"Press Ctrl+C or close this console to stop. Improving layouts are saved immediately.\n"
                <<"Initial layout snapshot interval: "<<request.config.continuousRoundSeconds<<" seconds; total time limit: "
@@ -216,9 +193,9 @@ int main(int argc,char** argv) {
         std::cout<<message<<"\n"<<std::flush;
       };
       size_t saved=0;
-      const auto finalStats=clinesting::runContinuousNesting(request,stopped,[&](const auto& candidate,const auto& result,size_t sequence) {
+      const auto finalStats=clinesting::runContinuousNesting(request,[&] {return latest.failed() || stopped();},[&](const auto& candidate,const auto& result,size_t sequence) {
         results.save(sequence,candidate,result,dxf.has_value(),svg.has_value());
-        publishResult(output,candidate,result);
+        latest.submit(candidate,result);
         saved=sequence;
         const auto quality=clinesting::layoutQuality(candidate.sheets,result.placement,result.bitmapStats);
         std::cout<<"Saved result"<<sequence<<".json"<<(dxf ? " + DXF" : "")<<(svg ? " + SVG" : "")
@@ -228,7 +205,7 @@ int main(int argc,char** argv) {
           <<" mm2; restart: "<<candidate.config.searchIteration<<"\n"<<std::flush;
         if(sequence==1 && request.output.openPreview) preview(results.path()/"result1.svg");
       });
-      if(saved) publishResult(output,request,finalStats);
+      if(saved) latest.submit(request,finalStats);
       request.config.searchProgress("Recursive finished: nodes="+std::to_string(finalStats.bitmapStats.recursiveNodes)+
         " backtracks="+std::to_string(finalStats.bitmapStats.recursiveBacktracks)+
         " duplicateSkips="+std::to_string(finalStats.bitmapStats.recursiveDuplicateSkips)+
@@ -250,6 +227,7 @@ int main(int argc,char** argv) {
                <<"; grid exhausted: "<<finalStats.bitmapStats.recursiveExhausted<<"\n";
       std::cout<<(finalStats.bitmapStats.timeLimitReached ? "Time limit reached. " : "Stop requested. ");
       std::cout<<"Search finished. Saved "<<saved<<" improving layouts in "<<results.path().string()<<"\n";
+      latest.finish();
       return 0;
     }
     auto first=request;
@@ -263,9 +241,11 @@ int main(int argc,char** argv) {
       const auto parent=fs::absolute(paths[i]).parent_path();
       fs::create_directories(parent);
     }
-    publishResult(output,request,result);
+    clinesting::cli::LatestJsonPublisher latest(output,request);
+    latest.submit(request,result);
     if(dxf) clinesting::exportPlacementResultToDxf(*dxf,request.sheets,request.individual.placement,result.placement);
     if(svg) clinesting::cli::exportSvg(*svg,request.sheets,request.individual.placement,result.placement);
+    latest.finish();
     std::cout<<"Placed: "<<request.individual.placement.size()-result.placement.unplaced.size()
       <<", unplaced: "<<result.placement.unplaced.size()<<", utilisation: "<<result.placement.utilisation<<"%\n"
       <<"Time: "<<result.timings.totalMs<<" ms; JSON: "<<fs::absolute(output).string()<<"\n";
