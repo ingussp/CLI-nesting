@@ -2,6 +2,7 @@
 #include "clinesting/dxf_export.hpp"
 #include "clinesting/gpu_bitmap.hpp"
 #include "clinesting/continuous_nesting.hpp"
+#include "clinesting/reusable_offcut.hpp"
 #include "continuous_results.hpp"
 #include "latest_json.hpp"
 #include <atomic>
@@ -236,7 +237,15 @@ int main(int argc,char** argv) {
     first.config.stopRequested=stopped;
     Sink sink;
     clinesting::BackgroundOrchestrator orchestrator;
-    const auto result=orchestrator.runWithStats(first,sink);
+    auto result=orchestrator.runWithStats(first,sink);
+    // First-mode reports need the same single-piece offcut as continuous
+    // publications. Measure the finished layout once, outside the search.
+    if(request.config.reusableOffcutEnabled) {
+      result.bitmapStats.reusableOffcut=clinesting::measureReusableOffcut(request.sheets,
+          request.individual.placement,result.placement,request.config);
+      result.bitmapStats.offcutEvaluations=1;
+      result.bitmapStats.offcutEvaluationMs=result.bitmapStats.reusableOffcut.elapsedMs;
+    }
     for(size_t i=1;i<paths.size();++i) {
       const auto parent=fs::absolute(paths[i]).parent_path();
       fs::create_directories(parent);

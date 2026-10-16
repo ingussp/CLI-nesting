@@ -96,6 +96,43 @@ class ProtocolTests(unittest.TestCase):
         self.assertIn('Recursive finished:', log)
         self.assertIn('cancelled=1', log)
 
+    def test_single_piece_offcut_in_both_modes(self):
+        for mode in ('first', 'continuous'):
+            with self.subTest(mode=mode):
+                path, data = self.job(mode)
+                data['config'].update(spacing=2.25, partToSheet=1, partToHole=2.25,
+                    reusableOffcut=dict(enabled=True, minWidthMm=3.25), timeLimitSeconds=.1 if mode=='continuous' else 0)
+                path.write_text(json.dumps(data), encoding='utf-8')
+                completed = subprocess.run([EXE, '--input', str(path)], cwd=self.root,
+                    capture_output=True, text=True, timeout=15)
+                self.assertEqual(completed.returncode, 0, completed.stderr)
+                result = json.loads((self.root / 'result.json').read_text(encoding='utf-8'))
+                offcut = result['reusableOffcut']
+                self.assertTrue(offcut['evaluated'])
+                self.assertEqual(offcut['minWidthMm'], 3.25)
+                self.assertEqual(offcut['clearances']['spacing'], 2.25)
+                self.assertGreater(offcut['area'], 0)
+                self.assertLessEqual(offcut['area'], result['usedSheetWasteArea'])
+                self.assertGreater(len(offcut['points']), 3)
+                self.assertIn(offcut['sheetId'], [s['id'] for s in result['sheets']])
+                if mode == 'first': self.assertEqual(offcut['evaluations'], 1)
+
+    def test_first_offcut_disabled_and_no_placed_parts(self):
+        for enabled, fits in ((False, True), (True, False)):
+            with self.subTest(enabled=enabled, fits=fits):
+                path, data = self.job('first')
+                data['config']['reusableOffcut'] = dict(enabled=enabled, minWidthMm=1)
+                if not fits: data['sheets'][0]['points'] = [[0,0],[1,0],[1,1],[0,1]]
+                path.write_text(json.dumps(data), encoding='utf-8')
+                completed = subprocess.run([EXE, '--input', str(path)], cwd=self.root,
+                    capture_output=True, text=True, timeout=15)
+                self.assertEqual(completed.returncode, 0, completed.stderr)
+                result = json.loads((self.root / 'result.json').read_text(encoding='utf-8'))
+                self.assertEqual(result['reusableOffcut']['evaluated'], enabled)
+                if enabled:
+                    self.assertEqual(result['placed'], 0)
+                    self.assertEqual(result['reusableOffcut']['area'], 0)
+
     @unittest.skipUnless(os.name == 'nt', 'Windows file sharing semantics')
     def test_latest_publication_retries_while_reader_holds_file(self):
         import ctypes
