@@ -11,6 +11,8 @@
 namespace clinesting {
 
 enum class SearchMode { First, Continuous };
+// Automatic is retained internally for legacy algorithm regression comparisons.
+enum class FillDirection { Automatic, NarrowToWide, WideToNarrow };
 
 // Return the detected logical CPU count with a one-worker fallback.
 inline int defaultWorkerCount() {
@@ -108,6 +110,7 @@ struct Config {
   bool gpuFallbackToCpu{true};
   int gpuBatchSize{65536};
   double timeLimitSeconds{0.0}; // 0 = unlimited; shared by every bitmap strategy/sheet
+  FillDirection fillDirection{FillDirection::NarrowToWide};
   bool continuous{false};
   SearchMode mode{SearchMode::First};
   double continuousRoundSeconds{30.0}; // Initial-layout snapshot interval; never interrupts placement.

@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(clinesting VERSION 1.01 LANGUAGES CXX)
+project(clinesting VERSION 1.02 LANGUAGES CXX)
 
 option(CLINESTING_STATIC_RUNTIME "Use the static MSVC runtime for a standalone executable" ON)
 if(MSVC AND CLINESTING_STATIC_RUNTIME)
@@ -115,4 +115,9 @@ if(CLINESTING_BUILD_TESTS)
   add_executable(measure_saved_offcut tests/measure_saved_offcut.cpp)
   target_include_directories(measure_saved_offcut PRIVATE third_party)
   target_link_libraries(measure_saved_offcut PRIVATE clinesting)
+  if(Python3_Interpreter_FOUND)
+    add_test(NAME fill_direction
+      COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/fill_direction.py
+              --exe $<TARGET_FILE:clinesting_cli> --validator $<TARGET_FILE:validate_indexed_layout>)
+  endif()
 endif()

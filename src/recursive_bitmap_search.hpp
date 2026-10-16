@@ -37,7 +37,7 @@ class RecursiveGpuBroker {
   std::vector<uint8_t> filter(size_t owner,size_t sheet,const BitmapGrid& material,
       const BitmapGrid& occupied,std::vector<RecursiveGpuUpdate>& updates,uint64_t first,
       uint32_t count,uint32_t rows,uint32_t step,uint32_t firstMask,uint32_t masks,uint32_t edge,
-      RecursiveGpuTiming& timing) {
+      RecursiveGpuTiming& timing,std::span<const GpuCandidate> candidates={}) {
     const auto start=std::chrono::steady_clock::now();
     Lease turn(*this);
     const auto acquired=std::chrono::steady_clock::now();
@@ -54,7 +54,7 @@ class RecursiveGpuBroker {
     updates.clear();
     const auto updated=std::chrono::steady_clock::now();
     timing.updateMs+=std::chrono::duration<double,std::milli>(updated-acquired).count();
-    auto flags=device_.filterGrid(first,count,rows,step,material.widthPx,material.heightPx,firstMask,masks,edge,edge);
+    auto flags=candidates.empty() ? device_.filterGrid(first,count,rows,step,material.widthPx,material.heightPx,firstMask,masks,edge,edge) : device_.filter(candidates);
     timing.dispatchMs+=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-updated).count();
     return flags;
   }
@@ -74,9 +74,10 @@ PlacementResult recursiveBitmapSearch(const std::vector<Polygon>& sheets,
   counts.cpuWorkersUsed=parallel.size();
   PlacementResult best;best.unplaced=parts;
   size_t bestCount=0;
-  double bestWaste=std::numeric_limits<double>::infinity(),bestBounds=bestWaste,bestSpread=bestWaste;
+  double bestWaste=std::numeric_limits<double>::infinity(),bestBounds=bestWaste,bestSpread=bestWaste,bestDirection=bestWaste;
   struct Stock {
     Bounds bounds;
+    FillOrder flow;
     BitmapGrid material,occupied;
     std::vector<Polygon> geometry;
     std::vector<Placement> placed;
@@ -125,7 +126,7 @@ PlacementResult recursiveBitmapSearch(const std::vector<Polygon>& sheets,
   double placedArea=0;
   auto publish=[&] {
     if(placedCount<bestCount) return;
-    double stockArea=0,boundsArea=0,spread=0;
+    double stockArea=0,boundsArea=0,spread=0,direction=0;
     for(size_t s=0;s<stocks.size();++s) if(!stocks[s].placed.empty()) {
       stockArea+=polygonMaterialArea(sheets[s]);
       std::vector<Point> points;
@@ -135,18 +136,19 @@ PlacementResult recursiveBitmapSearch(const std::vector<Polygon>& sheets,
         spread+=placementSpreadCost(p,sb);
       }
       const auto bounds=getPolygonBounds(points);boundsArea+=bounds.width*bounds.height;
+      direction+=stocks[s].flow.cost(stocks[s].flow.depth(bounds),polygonMaterialArea(sheets[s]));
     }
     const double waste=stockArea-placedArea;
-    if(placedCount<bestCount || (placedCount==bestCount &&
-        (waste>bestWaste+1e-8 || (std::abs(waste-bestWaste)<=1e-8 &&
-        (boundsArea>bestBounds+1e-8 || (std::abs(boundsArea-bestBounds)<=1e-8 && spread>=bestSpread-1e-8)))))) return;
-    bestCount=placedCount;bestWaste=waste;bestBounds=boundsArea;bestSpread=spread;
+    if(bestCount>0 && !improvesLayout({parts.size()-placedCount,waste,boundsArea,spread,direction},
+        {parts.size()-bestCount,bestWaste,bestBounds,bestSpread,bestDirection})) return;
+    bestCount=placedCount;bestWaste=waste;bestBounds=boundsArea;bestSpread=spread;bestDirection=direction;
     best={};best.area=placedArea;best.totalarea=stockArea;
     for(size_t s=0;s<stocks.size();++s) if(!stocks[s].placed.empty())
       best.placements.push_back({sheets[s].source,sheets[s].id,stocks[s].placed});
     for(size_t i=0;i<parts.size();++i) if(!placed[i]) best.unplaced.push_back(parts[i]);
     best.fitness=double(best.unplaced.size());
     best.utilisation=stockArea>0 ? 100*placedArea/stockArea : 0;
+    counts.fillDirectionCost=direction;
     counts.occupiedBoundsArea=boundsArea;counts.placementSpreadCost=spread;counts.placedParts=placedCount;
     counts.unplacedParts=best.unplaced.size();counts.acceptedPlacements=placedCount;
     counts.totalBitmapMs=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-started).count();
@@ -158,6 +160,7 @@ PlacementResult recursiveBitmapSearch(const std::vector<Polygon>& sheets,
     stocks.resize(sheets.size());
     for(size_t s=0;s<sheets.size();++s) {
       stocks[s].material=rasterizeSheetMaterial(sheets[s],config.bitmapResolutionMm,stocks[s].bounds,deadline,parallel);
+      stocks[s].flow=sheetFillOrder(sheets[s],config.fillDirection);
       stocks[s].occupied=makeBitmapGrid(stocks[s].material.widthPx,stocks[s].material.heightPx);
       stocks[s].neighbours=std::make_unique<SpatialIndex>(std::max(config.bitmapResolutionMm,
           std::max(stocks[s].bounds.width,stocks[s].bounds.height)/32.0));
@@ -273,6 +276,7 @@ PlacementResult recursiveBitmapSearch(const std::vector<Polygon>& sheets,
       const uint32_t rows=uint32_t(spanY/step+1);
       const uint64_t columns=uint64_t(spanX/step+1);
       const uint64_t total=columns*rows*policy.count;
+      auto origin=[&](uint64_t index) {return stock.flow.origin(index/policy.count,columns,rows,int(step),int(edge));};
       if(frame.cursor==frame.flags.size()) {
         if(frame.next==total) {++frame.sheet;frame.next=0;frame.flags.clear();frame.cursor=0;frame.batchSize=4096;continue;}
         frame.batchFirst=frame.next;
@@ -298,8 +302,16 @@ PlacementResult recursiveBitmapSearch(const std::vector<Polygon>& sheets,
             }
             device.uploadMaskRange(fullPolicy.first,fullPolicy.count,words);
           });
+          std::vector<GpuCandidate> ordered;
+          if(stock.flow.enabled) {
+            ordered.reserve(batch);
+            for(uint32_t i=0;i<batch;++i) {
+              const uint64_t index=frame.next+i;const auto [x,y]=origin(index);
+              ordered.push_back({x,y,uint32_t(policy.first+index%policy.count)});
+            }
+          }
           frame.flags=gpu->filter(worker,frame.sheet,stock.material,stock.occupied,gpuUpdates,
-              frame.next,batch,rows,step,policy.first,policy.count,edge,gpuTiming);
+              frame.next,batch,rows,step,policy.first,policy.count,edge,gpuTiming,ordered);
           ++counts.gpuBatches;counts.gpuCandidates+=batch;
         } catch(const std::exception& e) {gpuFailure(e);}
         if(!gpu) {
@@ -307,7 +319,7 @@ PlacementResult recursiveBitmapSearch(const std::vector<Polygon>& sheets,
           for(uint32_t i=0;i<batch;++i) {
             if((i&255)==0) deadline.check();
             const uint64_t index=frame.next+i;const auto r=policy.first+index%policy.count;
-            const int x=int(index/policy.count/rows)*int(step)+int(edge),y=int((index/policy.count)%rows)*int(step)+int(edge);
+            const auto [x,y]=origin(index);
             pixels.ensure(*masks[r]);
             frame.flags[i]=maskFits(stock.occupied,stock.material,*masks[r],x,y,false);
           }

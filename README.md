@@ -362,6 +362,51 @@ Curves must be approximated by points before running the CLI. `filename` does
 not import a file. There is no DXF/STEP import, 3D transformation, automatic kerf
 compensation or toolpath generation.
 
+## Filling direction (version 1.02)
+
+Choose the stock-filling direction in `input.json`:
+
+```json
+"config": {
+  "mode": "first",
+  "fillDirection": "narrow-to-wide",
+  "spacing": 2,
+  "partToSheet": 2
+}
+```
+
+Use `"wide-to-narrow"` for the opposite preference. **Narrow to wide is the
+default** when the field is omitted. The two values work with First and
+Continuous search and with CPU or OpenCL collision filtering.
+
+For a rectangular sheet, narrow-to-wide starts at one short edge and progresses
+along the long dimension. Wide-to-narrow starts at one long edge. Equal sides
+use a deterministic bottom-edge tie break. For irregular stock, the engine
+compares the mean material cross-section within the outer quarter of each
+bounding-box side, subtracting holes; this avoids selecting a side solely from
+one narrow vertex. Each sheet chooses its own direction in world coordinates.
+
+Contact proposals, recursive grid traversal, repeated-pattern order and vector
+compaction prefer the selected start edge. A tapered-stock proposal pass finds
+positions near narrow ends that cannot accept a part at a bounding-box corner.
+The direction is a search preference: if a part cannot fit at the narrow end,
+the engine searches farther into the sheet. Existing hole-filling and concave
+pocket proposals remain available.
+
+Layout ranking retains **placed count first, then used-sheet waste**, followed
+by consumed depth in the selected direction, compactness and spread. The new
+`fillDirectionCost` diagnostic is consumed depth divided by sheet depth and
+multiplied by sheet material area, summed across used sheets. A lower score
+keeps more of the far end unconsumed. Direction can change a heuristic layout
+and search time; a fixed deadline cannot guarantee the same result as another
+direction. Original geometry, allowed rotations, grain rules, clearances and
+exact collision validation are preserved. No part or sheet is mirrored or
+rotated merely to change the filling direction.
+
+Result JSON records `fillDirection`, `fillDirectionCost` and each used sheet's
+`fillStartEdge` (`bottom`, `top`, `left` or `right`). Exported contours and
+placements remain in their original coordinate system.
+
 ## Search settings
 
 Every field below belongs inside `config`.
@@ -369,6 +414,7 @@ Every field below belongs inside `config`.
 | Field | Default | Values and purpose |
 |---|---|---|
 | `mode` | Inferred, normally `first` | `first`, `continuous` |
+| `fillDirection` | `narrow-to-wide` | `narrow-to-wide` or `wide-to-narrow`; stock-filling preference in both modes (1.02+) |
 | `timeLimitSeconds` | 0 | 0..86400; continuous total budget in seconds, 0 = unlimited; first requires 0 |
 | `continuousRoundSeconds` | 30 | 0.01..86400; initial-layout snapshot interval; placement continues between snapshots, bounded only by cancellation or the total time limit |
 | `threads` | Logical CPU count | Integer 1..256; shared CPU worker budget |
@@ -381,7 +427,7 @@ Every field below belongs inside `config`.
 | `partToSheet` | 0 mm | Margin from parts to the stock outline |
 | `partToHole` | 0 mm | Clearance to stock cutouts and between boundaries involving part holes |
 | `gpu` | false | Boolean or OpenCL configuration object |
-| `reusableOffcut` | Enabled, minimum width 5 mm | Boolean or `{ "enabled":true, "minWidthMm":5 }`; report reusable material before continuous result publication |
+| `reusableOffcut` | Enabled, minimum width 5 mm | Boolean or `{ "enabled":true, "minWidthMm":5 }`; report reusable material before result publication in both modes |
 
 The three clearances are independent. Zero allows touching, not overlap.
 Positive values reject contact. Original contours are exported unchanged.

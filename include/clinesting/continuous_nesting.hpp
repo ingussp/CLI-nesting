@@ -9,6 +9,7 @@ struct LayoutQuality {
   double usedSheetWasteArea{0};
   double compactWasteArea{0};
   double placementSpreadCost{0};
+  double fillDirectionCost{0};
 };
 // Compute unplaced count and unused stock/bounding areas.
 LayoutQuality layoutQuality(const std::vector<Polygon>& sheets,const PlacementResult& result,

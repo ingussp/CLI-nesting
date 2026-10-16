@@ -23,7 +23,7 @@ LayoutQuality layoutQuality(const std::vector<Polygon>& sheets,const PlacementRe
     usedArea+=polygonMaterialArea(*sheet);
   }
   return {result.unplaced.size(),std::max(0.0,usedArea-result.area),
-          std::max(0.0,stats.occupiedBoundsArea-result.area),stats.placementSpreadCost};
+          std::max(0.0,stats.occupiedBoundsArea-result.area),stats.placementSpreadCost,stats.fillDirectionCost};
 }
 // Compare layouts by completeness, stock waste and compactness.
 bool improvesLayout(const LayoutQuality& candidate,const LayoutQuality& incumbent) {
@@ -34,6 +34,8 @@ bool improvesLayout(const LayoutQuality& candidate,const LayoutQuality& incumben
   };
   const int waste=compare(candidate.usedSheetWasteArea,incumbent.usedSheetWasteArea);
   if(waste!=0) return waste<0;
+  const int direction=compare(candidate.fillDirectionCost,incumbent.fillDirectionCost);
+  if(direction!=0) return direction<0;
   const int compact=compare(candidate.compactWasteArea,incumbent.compactWasteArea);
   return compact<0 || (compact==0 && compare(candidate.placementSpreadCost,incumbent.placementSpreadCost)<0);
 }

@@ -1,6 +1,7 @@
 {
   "units": "mm",
   "config": {
+    "fillDirection": "narrow-to-wide",
     "spacing": 5,
     "partToSheet": 5,
     "partToHole": 2,

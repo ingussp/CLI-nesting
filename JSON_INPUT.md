@@ -24,6 +24,7 @@ Use one root `config` object:
 ```json
 "config": {
   "mode": "continuous", "timeLimitSeconds": 60,
+  "fillDirection": "narrow-to-wide",
   "threads": 4, "resolution": 1,
   "spacing": 2, "partToSheet": 2, "partToHole": 2,
   "gpu": false
@@ -38,6 +39,13 @@ Use one root `config` object:
 Part `rotations` selects a uniform orientation count; default 4. Use `angle` or
 `allowedAngles` for absolute permitted orientations. Stock orientation is fixed.
 The three clearance settings are independent and do not modify exported contours.
+
+`fillDirection` accepts `narrow-to-wide` (default) or `wide-to-narrow`.
+It is available in version 1.02 and applies to both search modes. For rectangles,
+narrow-to-wide starts at a short edge; wide-to-narrow starts at a long edge.
+For irregular stock, the engine compares average usable cross-section widths
+near the four bounding-box edges. Each sheet receives its own start edge.
+Part coordinates, permitted rotations, holes and clearances remain unchanged.
 
 ## Output and cancellation
 

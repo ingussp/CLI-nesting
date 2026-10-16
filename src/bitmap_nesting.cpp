@@ -1,5 +1,6 @@
 #include "clinesting/bitmap_nesting.hpp"
 #include "clinesting/continuous_nesting.hpp"
+#include "clinesting/fill_direction.hpp"
 
 #include "clinesting/geometry.hpp"
 #include "clinesting/nfp.hpp"
@@ -97,6 +98,8 @@ struct RasterMask {
   mutable detail::PixelRect filledCore;
   mutable detail::PixelRect geometricCore;
   mutable bool coreVerified{false};
+  mutable bool directionSeedsReady{false};
+  mutable std::vector<std::pair<int,int>> directionOrigins;
 };
 
 // Uniform spatial bins only select neighbours. Original polygons remain authoritative.
@@ -154,10 +157,12 @@ void refineVectors(const std::vector<Polygon>& sheets,const std::vector<Polygon>
   bool stopped=false;
   double occupied=0;
   stats.placementSpreadCost=0;
+  stats.fillDirectionCost=0;
   for(auto& layout:result.placements) {
     const auto sheet=std::find_if(sheets.begin(),sheets.end(),[&](const Polygon& p){return p.id==layout.sheetid;});
     if(sheet==sheets.end()) throw std::runtime_error("Unknown sheet in vector refinement");
     const auto sb=getPolygonBounds(sheet->points);
+    const auto flow=sheetFillOrder(*sheet,cfg.fillDirection);
     SpatialIndex index(std::max(16.0,std::max(sb.width,sb.height)/32.0));
     std::vector<Polygon> absolute;
     detail::ConvexPairCache pairCache;
@@ -184,16 +189,17 @@ void refineVectors(const std::vector<Polygon>& sheets,const std::vector<Polygon>
     for(const auto& p:absolute) partEdges.emplace_back(p);
     for(int pass=0;pass<3 && !stopped;++pass) {
       bool moved=false;
-      for(size_t i=0;i<absolute.size() && !stopped;++i) for(int axis:{1,0}) {
+      for(size_t i=0;i<absolute.size() && !stopped;++i) for(int axis:std::array<int,2>{flow.enabled?flow.axis:1,flow.enabled?1-flow.axis:0}) {
         if(deadline.expired()) {stopped=true;break;}
         auto& placement=layout.sheetplacements[i];
         const auto bounds=getPolygonBounds(absolute[i].points);
-        const double limit=std::max(0.0,axis ? bounds.y-sb.y-cfg.sheetSpacing : bounds.x-sb.x-cfg.sheetSpacing);
+        const double sign=flow.enabled && flow.reverse && axis==flow.axis ? 1.0 : -1.0;
+        const double limit=std::max(0.0,axis ? (sign>0 ? sb.y+sb.height-bounds.y-bounds.height : bounds.y-sb.y)-cfg.sheetSpacing : (sign>0 ? sb.x+sb.width-bounds.x-bounds.width : bounds.x-sb.x)-cfg.sheetSpacing);
         if(limit<=tolerance) continue;
         auto validShift=[&](double amount) {
           if(deadline.expired()) {stopped=true;return false;}
           ++stats.vectorChecks;
-          const Point shift{axis?0:-amount,axis?-amount:0,true};
+          const Point shift{axis?0:sign*amount,axis?sign*amount:0,true};
           auto candidate=shiftPolygon(absolute[i],shift);
           auto b=getPolygonBounds(candidate.points);
           const auto stockCheck=sheetRectangle.violation(b,cfg.sheetSpacing,pairGuard);
@@ -222,9 +228,9 @@ void refineVectors(const std::vector<Polygon>& sheets,const std::vector<Polygon>
           if(validShift(mid)) low=mid;else high=mid;
         }
         if(low>tolerance) {
-          absolute[i]=shiftPolygon(absolute[i],{axis?0:-low,axis?-low:0,true});
+          absolute[i]=shiftPolygon(absolute[i],{axis?0:sign*low,axis?sign*low:0,true});
           partEdges[i]=detail::ClearanceIndex(absolute[i]);
-          if(axis) placement.y-=low;else placement.x-=low;
+          if(axis) placement.y+=sign*low;else placement.x+=sign*low;
           // Stale bin entries are conservative; query deduplication and exact
           // geometry validation ensure they cannot cause a missed neighbour.
           index.insert(getPolygonBounds(absolute[i].points),i);
@@ -239,6 +245,7 @@ void refineVectors(const std::vector<Polygon>& sheets,const std::vector<Polygon>
       stats.placementSpreadCost+=placementSpreadCost(p,sb);
     }
     occupied+=right*top;
+    stats.fillDirectionCost+=fillDirectionCost(*sheet,absolute,cfg.fillDirection);
   }
   stats.occupiedBoundsArea=occupied;
   stats.vectorRefinementCompleted=!stopped;
@@ -757,19 +764,35 @@ struct PairPattern {
     return cells*members;
   }
   // Advance to the next available cached origin or pattern position.
-  Candidate next() {
+  Candidate next(const FillOrder* flow=nullptr) {
     const auto index = cursor++;
-    const auto cell = index / members;
+    auto cell = index / members;
     auto c = !group.empty() ? group[size_t(index%members)] : (members == 2 && index % 2 ? b : a);
     if(oddColumns<0) {
-      c.x += int(cell % columns) * width;
-      c.y += int(cell / columns) * height;
+      int col=int(cell%columns),row=int(cell/columns);
+      if(flow && flow->axis==0) {row=int(cell%rows);col=int(cell/rows);}
+      if(flow && flow->reverse) {if(flow->axis==0)col=columns-1-col;else row=rows-1-row;}
+      c.x += col * width;
+      c.y += row * height;
     } else {
-      const auto pair=cell/uint64_t(columns+oddColumns);
-      const auto offset=cell%uint64_t(columns+oddColumns);
-      const bool odd=offset>=uint64_t(columns);
-      c.x+=int(odd?offset-columns:offset)*width+(odd?rowShift:0);
-      c.y+=int(2*pair+odd)*height;
+      if(flow && flow->reverse)cell=capacity()/members-1-cell;
+      uint64_t col,row;
+      if(flow && flow->axis==0) {
+        const uint64_t common=uint64_t(std::min(columns,oddColumns))*rows;
+        if(cell<common) {col=cell/rows;row=cell%rows;}
+        else {
+          const uint64_t count=columns>oddColumns ? (rows+1)/2 : rows/2;
+          col=std::min(columns,oddColumns)+(cell-common)/count;
+          row=2*((cell-common)%count)+(columns>oddColumns?0:1);
+        }
+      } else {
+        const auto pair=cell/uint64_t(columns+oddColumns);
+        const auto offset=cell%uint64_t(columns+oddColumns);
+        const bool odd=offset>=uint64_t(columns);
+        col=odd?offset-columns:offset;row=2*pair+odd;
+      }
+      c.x+=int(col)*width+(row%2?rowShift:0);
+      c.y+=int(row)*height;
     }
     return c;
   }
@@ -946,6 +969,7 @@ PlacementResult placePartsBitmapOnSingleSheet(const Polygon& sheet,
   std::unordered_map<std::string, PairPattern> patterns;
   if (config.bitmapPatternTrial)
     for (const auto& p : parts) ++repetitions[searchPolicyKey(p)];
+  const auto flow=sheetFillOrder(sheet,config.fillDirection);
   int usedWidth = 0, usedHeight = 0;
   size_t placedCount = 0;
   size_t unplacedCount = 0;
@@ -1159,6 +1183,10 @@ PlacementResult placePartsBitmapOnSingleSheet(const Polygon& sheet,
       // Explore a different permitted anchor angle before greedy completion.
       const int64_t anchorPenalty=placedCount==0 && config.searchIteration>0 && c.rotation!=0
           ? int64_t(material.widthPx)*material.heightPx+material.widthPx+material.heightPx+1 : 0;
+      if(flow.enabled) {
+        const Bounds b{sheetBounds.x+c.x*config.bitmapResolutionMm,sheetBounds.y+c.y*config.bitmapResolutionMm,m->widthPx*config.bitmapResolutionMm,m->heightPx*config.bitmapResolutionMm};
+        return {anchorPenalty+int64_t(std::llround(flow.depth(b)/config.bitmapResolutionMm)), flow.axis==0?c.y:c.x, int(std::min<int64_t>(INT32_MAX,int64_t(w)*h)), std::max(w,h), c.rotation};
+      }
       if(config.bitmapBottomLeft) return {anchorPenalty+int64_t(c.y),c.x,0,0,c.rotation};
       return {anchorPenalty+int64_t(w) * h, std::max(w, h), c.x, c.y, c.rotation};
     };
@@ -1350,7 +1378,7 @@ PlacementResult placePartsBitmapOnSingleSheet(const Polygon& sheet,
       while(!fromPattern) {
         if(pattern.pendingCursor==pattern.pending.size()) {
           pattern.pending.clear(); pattern.pendingCursor=0;
-          while(pattern.cursor<pattern.capacity() && pattern.pending.size()<validationBatch) pattern.pending.push_back(pattern.next());
+          while(pattern.cursor<pattern.capacity() && pattern.pending.size()<validationBatch) pattern.pending.push_back(pattern.next(flow.enabled?&flow:nullptr));
           if(pattern.pending.empty()) break;
           pattern.flags=gpuCandidates(pattern.pending).value_or(std::vector<uint8_t>{});
           // Prevalidate lookahead once across CPU workers. Permanent failures
@@ -1408,6 +1436,14 @@ PlacementResult placePartsBitmapOnSingleSheet(const Polygon& sheet,
         const int edgeGap=static_cast<int>(std::min(maxGap,std::ceil(config.sheetSpacing/config.bitmapResolutionMm)));
         const int partGap=static_cast<int>(std::min(maxGap,std::ceil(config.spacing/config.bitmapResolutionMm)));
         if(tile==0) {
+          if(r%contactStride==0 && flow.enabled) {
+            if(!m->directionSeedsReady) {
+              directionSeeds(sheet,flow,m->widthPx,m->heightPx,config.bitmapResolutionMm,config.sheetSpacing,
+                  [&](int x,int y){m->directionOrigins.emplace_back(x,y);});
+              m->directionSeedsReady=true;
+            }
+            for(const auto& [x,y]:m->directionOrigins)propose(x,y,r);
+          }
           const int farX=material.widthPx-m->widthPx-edgeGap;
           const int farY=material.heightPx-m->heightPx-edgeGap;
           propose(edgeGap,edgeGap,r);
@@ -1521,6 +1557,7 @@ PlacementResult placePartsBitmapOnSingleSheet(const Polygon& sheet,
       if(config.bitmapBottomLeft && seeds.empty()) {
         PhaseTimer timer{localStats.phases.searchMs};
         std::sort(candidates.begin(),candidates.end(),[&](const Candidate& a,const Candidate& b) {
+          if(flow.enabled)return score(a)<score(b);
           if(config.bitmapNfpContacts && config.bitmapContactColumnFirst)
             return std::tie(a.x,a.y,a.rotation)<std::tie(b.x,b.y,b.rotation);
           return std::tie(a.y,a.x,a.rotation)<std::tie(b.y,b.x,b.rotation);
@@ -1529,15 +1566,16 @@ PlacementResult placePartsBitmapOnSingleSheet(const Polygon& sheet,
         // No grid fallback: a failed shortlist does not prove that the shape
         // cannot fit. Later placements can create new contact candidates.
       } else {
-      auto rank = [](const Candidate& a, const Candidate& b) {
+      auto rank = [&](const Candidate& a, const Candidate& b) {
+        if(flow.enabled)return score(a)<score(b);
         return std::tie(a.area,a.extent,a.x,a.y,a.rotation) < std::tie(b.area,b.extent,b.x,b.y,b.rotation);
       };
 
       // Start with the occupied rectangle plus one part, growing only when necessary.
       {
       PhaseTimer timer{localStats.phases.searchMs};
-      int windowW = std::min(material.widthPx, usedWidth + maxWidth);
-      int windowH = std::min(material.heightPx, usedHeight + maxHeight);
+      int windowW = flow.enabled && flow.reverse && flow.axis==0 ? material.widthPx : std::min(material.widthPx, usedWidth + maxWidth);
+      int windowH = flow.enabled && flow.reverse && flow.axis==1 ? material.heightPx : std::min(material.heightPx, usedHeight + maxHeight);
       while (true) {
         deadline.check();
         std::vector<Candidate> inWindow;
@@ -1785,6 +1823,7 @@ PlacementResult placePartsBitmapOnSingleSheet(const Polygon& sheet,
       counters.layoutInProgress=true;counters.completedTrials=0;
       counters.unplacedParts=snapshot.unplaced.size();
       counters.occupiedBoundsArea=double(usedWidth)*usedHeight*config.bitmapResolutionMm*config.bitmapResolutionMm;
+      counters.fillDirectionCost=fillDirectionCost(sheet,placedAbsolute,config.fillDirection);
       counters.placementSpreadCost=0;
       for(const auto& p:placedAbsolute) counters.placementSpreadCost+=placementSpreadCost(p,sheetBounds);
       counters.totalBitmapMs=std::chrono::duration<double,std::milli>(now-bitmapStart).count();
@@ -1792,6 +1831,7 @@ PlacementResult placePartsBitmapOnSingleSheet(const Polygon& sheet,
     }
   }
 
+  localStats.fillDirectionCost=fillDirectionCost(sheet,placedAbsolute,config.fillDirection);
   localStats.cachedMaskCount = maskCache.size();
   localStats.occupiedBoundsArea = double(usedWidth) * usedHeight * config.bitmapResolutionMm * config.bitmapResolutionMm;
   for(const auto& absolute:placedAbsolute) localStats.placementSpreadCost+=placementSpreadCost(absolute,sheetBounds);
@@ -1892,20 +1932,23 @@ PlacementResult refillBitmapLayout(const std::vector<Polygon>& sheets,
     remaining=std::move(filled.unplaced);
   }
   // Restore original complete angle policies for every still-unplaced copy.
-  result.unplaced.clear();result.area=0;result.totalarea=0;counts.occupiedBoundsArea=0;counts.placementSpreadCost=0;
+  result.unplaced.clear();result.area=0;result.totalarea=0;counts.occupiedBoundsArea=0;counts.placementSpreadCost=0;counts.fillDirectionCost=0;
   std::unordered_set<int> placed;
   for(const auto& layout:result.placements) {
     const auto sheet=std::find_if(sheets.begin(),sheets.end(),[&](const auto& p){return p.id==layout.sheetid;});
     const auto sb=getPolygonBounds(sheet->points);double right=0,top=0,left=sb.width,bottom=sb.height;
+    std::vector<Polygon> flowGeometry;
     if(!layout.sheetplacements.empty()) result.totalarea+=polygonMaterialArea(*sheet);
     for(const auto& placement:layout.sheetplacements) {
       placed.insert(placement.id.value());
       const auto source=std::find_if(parts.begin(),parts.end(),[&](const auto& p){return p.id==placement.id;});
       const auto geometry=shiftPolygon(rotatePolygon(*source,placement.rotation),{placement.x,placement.y,true});
       counts.placementSpreadCost+=placementSpreadCost(geometry,sb);
+      flowGeometry.push_back(geometry);
       const auto b=getPolygonBounds(geometry.points);right=std::max(right,b.x+b.width-sb.x);top=std::max(top,b.y+b.height-sb.y);
       left=std::min(left,b.x-sb.x);bottom=std::min(bottom,b.y-sb.y);
     }
+    counts.fillDirectionCost+=fillDirectionCost(*sheet,flowGeometry,config.fillDirection);
     if(!layout.sheetplacements.empty()) counts.occupiedBoundsArea+=(right-left)*(top-bottom);
   }
   for(const auto& part:parts) {
@@ -2043,6 +2086,7 @@ PlacementResult placePartsBitmap(const std::vector<Polygon>& sheets,
             snapshot.utilisation=snapshot.totalarea>0 ? 100*snapshot.area/snapshot.totalarea : 0;
             auto data=counters;data.occupiedBoundsArea+=trial.stats.occupiedBoundsArea;
             data.placementSpreadCost+=trial.stats.placementSpreadCost;
+            data.fillDirectionCost+=trial.stats.fillDirectionCost;
             data.placedParts=parts.size()-snapshot.unplaced.size();data.unplacedParts=snapshot.unplaced.size();
             data.cpuWorkersUsed=workerCount*helpersPerTrial;data.proposalWorkersPerTrial=helpersPerTrial;
             data.gpuCandidates+=trial.stats.gpuCandidates;data.gpuBatches+=trial.stats.gpuBatches;
@@ -2124,6 +2168,7 @@ PlacementResult placePartsBitmap(const std::vector<Polygon>& sheets,
           t.candidateWorkersUsed=std::max(t.candidateWorkersUsed,s.candidateWorkersUsed);
           t.occupiedBoundsArea+=s.occupiedBoundsArea;
           t.placementSpreadCost+=s.placementSpreadCost;
+          t.fillDirectionCost+=s.fillDirectionCost;
           t.pocketRelocations+=s.pocketRelocations;
           t.perPart.insert(t.perPart.end(),s.perPart.begin(),s.perPart.end());
         }
@@ -2159,7 +2204,7 @@ PlacementResult placePartsBitmap(const std::vector<Polygon>& sheets,
   }
   if (error) std::rethrow_exception(error);
   auto scoreTrial=[](const Trial& t) {
-    return std::tuple{t.result.unplaced.size(),t.result.totalarea-t.result.area,t.stats.occupiedBoundsArea,t.stats.placementSpreadCost};
+    return std::tuple{t.result.unplaced.size(),t.result.totalarea-t.result.area,t.stats.fillDirectionCost,t.stats.occupiedBoundsArea,t.stats.placementSpreadCost};
   };
   size_t best=0;
   bool haveBest=false;

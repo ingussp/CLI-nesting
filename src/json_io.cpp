@@ -1,4 +1,5 @@
 #include "clinesting/json_io.hpp"
+#include "clinesting/fill_direction.hpp"
 #include "clinesting/continuous_nesting.hpp"
 #include "clinesting/geometry.hpp"
 #include <nlohmann/json.hpp>
@@ -162,6 +163,11 @@ void configure(const Json& j,Config& c) {
       if(v=="first") c.mode=SearchMode::First;
       else if(v=="continuous") c.mode=SearchMode::Continuous;
       else throw std::invalid_argument("mode must be first or continuous");
+    }
+    else if(k=="fillDirection") {
+      if(v=="narrow-to-wide") c.fillDirection=FillDirection::NarrowToWide;
+      else if(v=="wide-to-narrow") c.fillDirection=FillDirection::WideToNarrow;
+      else throw std::invalid_argument("fillDirection must be narrow-to-wide or wide-to-narrow");
     }
     else if(k=="continuous") {
       if(!v.is_boolean()) throw std::invalid_argument("continuous must be boolean");
@@ -340,6 +346,8 @@ void writeNestingJson(const std::filesystem::path& path,const BackgroundRequest&
   out["gpuOccupancy"]={{"uploadBytes",run.bitmapStats.gpuOccupancyUploadBytes},{"deviceUpdates",run.bitmapStats.gpuOccupancyUpdates}};
   out["stopReason"]=run.bitmapStats.cancelled ? "user_stop" : run.bitmapStats.timeLimitReached ? "time_limit" : run.bitmapStats.layoutInProgress ? "in_progress" :
     input.config.mode==SearchMode::Continuous && !run.bitmapStats.recursiveExhausted ? "searching" : "completed";
+  out["fillDirection"]=input.config.fillDirection==FillDirection::WideToNarrow ? "wide-to-narrow" : "narrow-to-wide";
+  out["fillDirectionCost"]=run.bitmapStats.fillDirectionCost;
   out["continuous"]=input.config.continuous;
   out["mode"]=input.config.mode==SearchMode::First ? "first" : "continuous";
   out["continuousRoundSeconds"]=input.config.continuousRoundSeconds;
@@ -387,6 +395,8 @@ void writeNestingJson(const std::filesystem::path& path,const BackgroundRequest&
     Json sheetResult={{"id",s.sheetid.value_or(0)},{"source",s.sheet},{"parts",Json::array()}};
     if(sheet!=input.sheets.end()) {
       sheetResult["points"]=pointsJson(*sheet); sheetResult["holes"]=holesJson(*sheet);
+      const auto flow=sheetFillOrder(*sheet,input.config.fillDirection);
+      sheetResult["fillStartEdge"]=flow.axis==0 ? (flow.reverse ? "right" : "left") : (flow.reverse ? "top" : "bottom");
     }
     for(const auto& p:s.sheetplacements) {
       const auto found=parts.find(p.id.value_or(0));

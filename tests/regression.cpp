@@ -3,6 +3,7 @@
 #include "clinesting/gpu_bitmap.hpp"
 #include "clinesting/json_io.hpp"
 #include "clinesting/continuous_nesting.hpp"
+#include "clinesting/fill_direction.hpp"
 #include "raster_scanline.hpp"
 #include "free_rectangles.hpp"
 #include "rejection_cache.hpp"
@@ -339,6 +340,9 @@ void freeRectangleProof() {
 }
 void mixedPanelsAndMultipleSheets() {
   auto cfg=settings();cfg.spacing=6.5;cfg.holeSpacing=6.5;cfg.sheetSpacing=0;cfg.threads=4;
+  // Retain the original compact-search performance baseline. Public directional
+  // mixed-stock runs are covered independently by fill_direction.py.
+  cfg.fillDirection=FillDirection::Automatic;
   std::vector<Polygon> sheets,parts;
   for(int i=0;i<4;++i) sheets.push_back(rectangle(0,0,2000,2800,100+i));
   for(int i=0;i<4;++i) {
@@ -378,6 +382,8 @@ void restartAnchorAngles() {
 }
 void bottomLeftSearch() {
   auto cfg=settings();cfg.bitmapBottomLeft=true;cfg.spacing=6.5;cfg.holeSpacing=6.5;cfg.sheetSpacing=0;cfg.threads=1;
+  // This fixture specifically checks bottom-row filling on landscape stock.
+  cfg.fillDirection=FillDirection::WideToNarrow;
   auto sheet=rectangle(0,0,100,80,99);
   std::vector<Polygon> parts{rectangle(0,0,10,10,1),rectangle(0,0,20,20,2),rectangle(0,0,40,30,3)};
   for(auto& p:parts)p.allowedAngles={0};
@@ -622,6 +628,7 @@ void concavePocketRelocation() {
   for(const auto& part:parts) initial.area+=polygonMaterialArea(part);
   initial.totalarea=2500;
   BitmapNestingStats before;before.occupiedBoundsArea=50*50;
+  before.fillDirectionCost=fillDirectionCost(sheet,transformed(parts,initial),cfg.fillDirection);
   for(const auto& geometry:transformed(parts,initial)) {
     const auto bounds=getPolygonBounds(geometry.points);
     before.placementSpreadCost+=polygonMaterialArea(geometry)*(bounds.x+bounds.width/2-7+bounds.y+bounds.height/2-11);
@@ -1112,8 +1119,29 @@ void continuousReportingFailure() {
   require(threw,"Failed asynchronous publication did not stop the search");
 }
 
+void directionGridCoverage() {
+  for(int axis:{0,1})for(bool reverse:{false,true})for(int columns:{1,2,5})for(int rows:{1,3,7}) {
+    FillOrder order;order.axis=axis;order.reverse=reverse;
+    std::set<std::pair<int,int>> points;
+    for(uint64_t i=0;i<uint64_t(columns)*rows;++i)points.insert(order.origin(i,columns,rows,3,2));
+    require(points.size()==size_t(columns*rows),"Direction grid lost/duplicated an origin");
+    for(int x=0;x<columns;++x)for(int y=0;y<rows;++y)
+      require(points.contains({2+3*x,2+3*y}),"Direction changed the step lattice");
+  }
+  auto portrait=rectangle(-10,20,30,100,7);
+  auto narrow=sheetFillOrder(portrait,FillDirection::NarrowToWide);
+  auto wide=sheetFillOrder(portrait,FillDirection::WideToNarrow);
+  require(narrow.axis==1 && !narrow.reverse && wide.axis==0 && !wide.reverse,"Rectangle direction failed");
+  auto taper=portrait;taper.points={{-10,20,true},{50,20,true},{25,120,true},{15,120,true}};
+  require(sheetFillOrder(taper,FillDirection::NarrowToWide).reverse,"Translated tapered stock did not select its narrow top");
+  // Neither direction may displace completeness or the used-stock objective.
+  require(improvesLayout({0,100,100,100,999},{1,0,0,0,0}),"Direction displaced completeness");
+  require(improvesLayout({0,0,100,100,999},{0,1,0,0,0}),"Direction displaced stock use");
+}
+
 int main(int argc,char** argv) {
   try {
+    directionGridCoverage();
     cliTraceFields();
     if(argc==2 && std::string(argv[1])=="--continuous-fixes") { publicationMailbox();continuousInitialCompletion();fillBeforeRepair();residentInitialGpu();progressiveMultipleSheets();recursiveNeighbourScaling();continuousReportingFailure();recursiveTreeAndGpuParity();std::cout<<"Continuous fixes passed\n";return 0; }
     if(argc==2 && std::string(argv[1])=="--offcut-only") { offcutClearances();offcutPublicationOnly();reusableOffcutObjective();std::cout<<"Offcut regressions passed\n";return 0; }
